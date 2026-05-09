@@ -1,0 +1,9 @@
+/.git
+/build
+/output
+/artifacts
+*.deb
+*.tar
+*.tar.gz
+*.zip
+__pycache__/
