@@ -460,7 +460,6 @@ def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) 
         "--disable-static",
         "--disable-doc",
         "--disable-programs",
-        "--disable-avutil",
     ]
 
     run(configure, cwd=src, env=env)

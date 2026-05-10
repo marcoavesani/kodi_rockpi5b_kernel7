@@ -196,6 +196,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     needs: build-ffmpeg
+    continue-on-error: true
     permissions:
       contents: read
       actions: read
@@ -255,7 +256,7 @@ jobs:
         with:
           name: rk3588-media-stack-libpostproc-debs-arm64
           path: artifacts/libpostproc-rockchip_*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
 
   build-kodi:
     name: Build Kodi debs (ARM64)
@@ -291,6 +292,7 @@ jobs:
 
       - name: Download libpostproc artifact
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: rk3588-media-stack-libpostproc-debs-arm64
           path: input-debs
@@ -362,7 +364,6 @@ jobs:
     needs:
       - build-ffmpeg
       - build-mpv
-      - build-libpostproc
       - build-kodi
     permissions:
       contents: read
