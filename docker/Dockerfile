@@ -57,6 +57,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libgles2-mesa-dev \
     libgl1-mesa-dev \
     libxkbcommon-dev \
+    libplacebo-dev \
+    libepoxy-dev \
+    liblcms2-dev \
+    libzimg-dev \
+    libharfbuzz-dev \
+    libfstrcmp-dev \
+    libmujs-dev \
+    liblua5.2-dev \
+    lua5.2 \
     libasound2-dev \
     libass-dev \
     libbluray-dev \
@@ -64,6 +73,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libdvdread-dev \
     libarchive-dev \
     libjpeg-dev \
+    libexiv2-dev \
     libuchardet-dev \
     zlib1g-dev \
     libfontconfig-dev \

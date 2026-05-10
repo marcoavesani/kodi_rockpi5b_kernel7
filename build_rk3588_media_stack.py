@@ -283,9 +283,11 @@ def install_deps(config: Config) -> None:
         "python3-pip", "swig", "default-jre", "ccache", "yasm", "nasm",
         "linux-libc-dev", "libdrm-dev", "libudev-dev", "libgbm-dev",
         "libegl1-mesa-dev", "libgles2-mesa-dev", "libgl1-mesa-dev",
-        "libxkbcommon-dev", "libasound2-dev", "libass-dev", "libbluray-dev",
+        "libxkbcommon-dev", "libplacebo-dev", "libepoxy-dev", "liblcms2-dev", "libzimg-dev",
+        "libharfbuzz-dev", "libfstrcmp-dev", "libmujs-dev", "liblua5.2-dev", "lua5.2",
+        "libasound2-dev", "libass-dev", "libbluray-dev",
         "libdvdnav-dev", "libdvdread-dev", "libarchive-dev", "libjpeg-dev",
-        "libuchardet-dev", "zlib1g-dev", "libfontconfig-dev", "libfreetype-dev",
+        "libexiv2-dev", "libuchardet-dev", "zlib1g-dev", "libfontconfig-dev", "libfreetype-dev",
         "libfribidi-dev", "libgif-dev", "liblzo2-dev", "libmicrohttpd-dev",
         "libnfs-dev", "libpcre2-dev", "libplist-dev", "libsqlite3-dev",
         "libssl-dev", "libtag1-dev", "libtinyxml-dev", "libtinyxml2-dev",
@@ -293,15 +295,12 @@ def install_deps(config: Config) -> None:
         "libfmt-dev", "libspdlog-dev", "flatbuffers-compiler",
         "libflatbuffers-dev", "libinput-dev", "libevdev-dev", "libcec-dev",
         "libcdio-dev", "libcurl4-openssl-dev", "libdbus-1-dev", "liblirc-dev",
-        "libshairplay-dev", "rsync",
+        "libshairplay-dev", "libdisplay-info-dev", "rsync",
     ]
     apt_install(config, required)
 
     optional = [
-        "libdisplay-info-dev",
         "libdav1d-dev",
-        "liblua5.2-dev",
-        "lua5.2",
         "ruby",
         "ruby-dev",
         "rubygems",
@@ -657,7 +656,16 @@ def build_kodi(config: Config) -> None:
     ]
 
     log(f"Configuring Kodi {version}")
-    run(cmake_cmd, cwd=build, env=env)
+    result = run(cmake_cmd, cwd=build, env=env, check=False)
+    if result.returncode != 0:
+        warn("Kodi configure failed; retrying with internal Exiv2 enabled.")
+        shutil.rmtree(build, ignore_errors=True)
+        build.mkdir(parents=True, exist_ok=True)
+        cmake_cmd_internal = [
+            *cmake_cmd,
+            "-DENABLE_INTERNAL_EXIV2=ON",
+        ]
+        run(cmake_cmd_internal, cwd=build, env=env)
 
     log("Building Kodi")
     run(["cmake", "--build", ".", "--", f"-j{config.jobs}"], cwd=build, env=env)
