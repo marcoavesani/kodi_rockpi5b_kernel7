@@ -679,6 +679,18 @@ def build_ffmpeg(config: Config) -> None:
     log("Staging FFmpeg install")
     run(["make", "install", f"DESTDIR={stage}"], cwd=src)
 
+    # FFmpeg's `make install` omits internal headers (e.g. mathops.h) that are
+    # #included by some public headers such as libavutil/fixed_dsp.h.  Downstream
+    # consumers like Kodi fail to compile unless those internal headers are also
+    # present.  Copy every internal libavutil header that is missing from the
+    # staged include tree.
+    staged_lavu = stage / str(config.install_prefix).lstrip("/") / "include" / "libavutil"
+    if staged_lavu.is_dir():
+        for internal_hdr in (src / "libavutil").glob("*.h"):
+            dest = staged_lavu / internal_hdr.name
+            if not dest.exists():
+                shutil.copy2(internal_hdr, dest)
+
     maybe_package_or_install(
         config,
         package=config.ffmpeg_package,
