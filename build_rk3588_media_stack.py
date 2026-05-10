@@ -473,6 +473,21 @@ def build_ffmpeg(config: Config) -> None:
     version = git_describe(src)
     prefix = str(config.install_prefix)
 
+    # Some FFmpeg forks/branches drop or rename configure flags.
+    # Probe supported options first to avoid cryptic configure failures.
+    configure_help = capture(["./configure", "--help"], cwd=src, check=False)
+    if "--enable-v4l2-request" not in configure_help:
+        die(
+            f"FFmpeg ref {config.ffmpeg_ref} does not support --enable-v4l2-request. "
+            "Use a v4l2request-capable FFmpeg ref or enable the external patch."
+        )
+
+    optional_flags: list[str] = []
+    if "--enable-postproc" in configure_help:
+        optional_flags.append("--enable-postproc")
+    else:
+        warn("FFmpeg configure option --enable-postproc is not supported by this ref; skipping it.")
+
     configure = [
         "./configure",
         f"--prefix={prefix}",
@@ -481,7 +496,7 @@ def build_ffmpeg(config: Config) -> None:
         "--disable-static",
         "--enable-libdrm",
         "--enable-v4l2-request",
-        "--enable-postproc",
+        *optional_flags,
         "--enable-pthreads",
         "--enable-decoder=h264",
         "--enable-decoder=hevc",
