@@ -448,7 +448,7 @@ def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) 
     prefix = str(config.install_prefix)
 
     log("Preparing external libpostproc from source")
-    git_checkout("https://github.com/michaelni/libpostproc.git", src, "main")
+    git_checkout("https://github.com/michaelni/libpostproc.git", src, "master")
     run(["git", "reset", "--hard"], cwd=src)
     run(["git", "clean", "-xfd"], cwd=src)
 
