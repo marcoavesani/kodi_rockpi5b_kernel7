@@ -399,7 +399,7 @@ def build_libplacebo_from_source(config: Config, minimum: str) -> None:
     if not (src / ".git").exists():
         log(f"Cloning libplacebo into {src}")
         src.parent.mkdir(parents=True, exist_ok=True)
-        run(["git", "clone", "https://github.com/haasn/libplacebo.git", str(src)])
+        run(["git", "clone", "--recursive", "https://github.com/haasn/libplacebo.git", str(src)])
 
     run(["git", "fetch", "--all", "--tags", "--prune"], cwd=src)
 
@@ -411,6 +411,16 @@ def build_libplacebo_from_source(config: Config, minimum: str) -> None:
         warn(f"Requested libplacebo tag {tag} not found; using latest origin/master.")
         run(["git", "checkout", "master"], cwd=src)
         run(["git", "pull", "--ff-only"], cwd=src, check=False)
+
+    # libplacebo needs 3rdparty submodules (e.g. glad) available at configure time.
+    run(["git", "submodule", "sync", "--recursive"], cwd=src)
+    run(["git", "submodule", "update", "--init", "--recursive"], cwd=src)
+
+    glad_dir = src / "3rdparty" / "glad"
+    if not glad_dir.exists():
+        warn("libplacebo submodule glad was not populated; cloning 3rdparty/glad fallback.")
+        (src / "3rdparty").mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", "https://github.com/Dav1dde/glad.git", str(glad_dir)])
 
     shutil.rmtree(build, ignore_errors=True)
 
@@ -431,6 +441,53 @@ def build_libplacebo_from_source(config: Config, minimum: str) -> None:
     run(["ninja", "-C", "build", f"-j{config.jobs}"], cwd=src, env=env)
     run(["meson", "install", "-C", "build"], cwd=src, env=env)
     run([config.sudo, "ldconfig"], check=False)
+
+
+def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) -> str:
+    src = config.build_root / "libpostproc"
+    prefix = str(config.install_prefix)
+
+    log("Preparing external libpostproc from source")
+    git_checkout("https://github.com/michaelni/libpostproc.git", src, "main")
+    run(["git", "reset", "--hard"], cwd=src)
+    run(["git", "clean", "-xfd"], cwd=src)
+
+    env = base_env(config)
+    configure = [
+        "./configure",
+        f"--prefix={prefix}",
+        "--enable-shared",
+        "--disable-static",
+        "--disable-doc",
+        "--disable-programs",
+        "--disable-avutil",
+    ]
+
+    run(configure, cwd=src, env=env)
+    run(["make", f"-j{config.jobs}"], cwd=src, env=env)
+    if stage is None:
+        run(["make", "install"], cwd=src, env=env)
+        run([config.sudo, "ldconfig"], check=False)
+    else:
+        run(["make", "install", f"DESTDIR={stage}"], cwd=src, env=env)
+
+    return git_describe(src)
+
+
+def build_libpostproc(config: Config) -> None:
+    stage = config.build_root / "stage" / "libpostproc"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True, exist_ok=True)
+
+    version = build_libpostproc_from_source(config, stage=stage)
+    maybe_package_or_install(
+        config,
+        package="libpostproc-rockchip",
+        version=version,
+        stage=stage,
+        description="External libpostproc plugin package for FFmpeg 8+ based Kodi builds",
+        depends=[],
+    )
 
 
 def require_fpm(config: Config) -> None:
@@ -729,6 +786,22 @@ def build_kodi(config: Config) -> None:
     prefix = str(config.install_prefix)
     env = base_env(config)
 
+    kodi_ffmpeg_extra: list[str] = []
+    if not pkg_config_exists("libpostproc", env=env):
+        warn("libpostproc not found. Attempting build from michaelni/libpostproc.")
+        try:
+            build_libpostproc_from_source(config)
+        except (BuildError, subprocess.CalledProcessError):
+            warn("Failed to build external libpostproc from source.")
+
+        env = base_env(config)
+        if not pkg_config_exists("libpostproc", env=env):
+            warn(
+                "libpostproc is still unavailable; "
+                "configuring Kodi with -DDISABLE_FFMPEG_SOURCE_PLUGINS=ON."
+            )
+            kodi_ffmpeg_extra.append("-DDISABLE_FFMPEG_SOURCE_PLUGINS=ON")
+
     cmake_cmd = [
         "cmake", str(src),
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
@@ -746,6 +819,7 @@ def build_kodi(config: Config) -> None:
         "-DENABLE_WAYLAND=OFF",
         "-DENABLE_VAAPI=OFF",
         "-DENABLE_VDPAU=OFF",
+        *kodi_ffmpeg_extra,
         *config.kodi_cmake_extra,
     ]
 
@@ -921,7 +995,7 @@ def parse_args() -> argparse.Namespace:
         "targets",
         nargs="*",
         default=["all"],
-        choices=["deps", "ffmpeg", "mpv", "kodi", "joystick", "all"],
+        choices=["deps", "ffmpeg", "libpostproc", "mpv", "kodi", "joystick", "all"],
         help="Build targets to run.",
     )
 
@@ -978,13 +1052,15 @@ def main() -> int:
 
         targets = args.targets
         if "all" in targets:
-            targets = ["deps", "ffmpeg", "mpv", "kodi", "joystick"]
+            targets = ["deps", "ffmpeg", "libpostproc", "mpv", "kodi", "joystick"]
 
         for target in targets:
             if target == "deps":
                 install_deps(config)
             elif target == "ffmpeg":
                 build_ffmpeg(config)
+            elif target == "libpostproc":
+                build_libpostproc(config)
             elif target == "mpv":
                 build_mpv(config)
             elif target == "kodi":
