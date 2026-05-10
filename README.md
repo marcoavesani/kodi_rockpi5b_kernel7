@@ -7,7 +7,7 @@ This repository builds ARM64 `.deb` packages for a ROCK Pi 5B / RK3588 media sta
 - Kodi GBM/GLES linked against that FFmpeg
 - optional Kodi `peripheral.joystick`
 
-The build runs inside Docker and is intended for GitHub Actions ARM64 runners.
+The build runs inside a Debian 13/Trixie Docker container and is intended for GitHub Actions ARM64 runners.
 
 ## Files
 
@@ -20,12 +20,23 @@ docker/entrypoint.sh              Container entrypoint
 .github/workflows/build-debs.yml  GitHub Actions workflow
 ```
 
+
+## Debian Trixie base image
+
+The default builder image is:
+
+```Dockerfile
+ARG BASE_IMAGE=debian:trixie
+```
+
+This matches Debian 13/Trixie userland. The container does **not** reproduce the ROCK Pi kernel; it only provides the userspace build environment used to compile and package FFmpeg, mpv and Kodi.
+
 ## Local ARM64 build
 
 On an ARM64 machine:
 
 ```bash
-docker build --platform linux/arm64 -f docker/Dockerfile -t rk3588-media-builder:arm64 .
+docker build --platform linux/arm64 --build-arg BASE_IMAGE=debian:trixie -f docker/Dockerfile -t rk3588-media-builder:arm64 .
 
 mkdir -p artifacts ccache
 
@@ -66,6 +77,38 @@ The generated packages are uploaded as the workflow artifact:
 ```text
 rk3588-media-stack-debs-arm64
 ```
+
+
+## Using an FFmpeg repo that already includes V4L2 Request
+
+If your FFmpeg repository/branch already has V4L2 Request support, disable the external patch in `rk3588-media-stack.ci.ini`:
+
+```ini
+[ffmpeg]
+repo = https://github.com/YOURUSER/FFmpeg.git
+ref = your-v4l2request-branch
+apply_patch = no
+```
+
+or override it from the command line:
+
+```bash
+./build_rk3588_media_stack.py \
+  --config rk3588-media-stack.ci.ini \
+  --ffmpeg-no-patch \
+  --ffmpeg-ref your-v4l2request-branch \
+  ffmpeg
+```
+
+The script will still configure FFmpeg with:
+
+```text
+--enable-v4l2-request
+--enable-hwaccel=h264_v4l2request
+--enable-hwaccel=hevc_v4l2request
+```
+
+so your FFmpeg tree must provide those configure options.
 
 ## Pinning known-good versions
 

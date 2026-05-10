@@ -2,11 +2,12 @@
 #
 # RK3588 media stack builder image.
 #
-# Default base is Ubuntu 24.04 because GitHub provides ubuntu-24.04-arm runners
-# and its packages are recent enough for Kodi GBM builds. Override with:
+# Default base is Debian 13 "trixie" to match Debian Trixie-based target systems.
+# Override with:
+#   docker build --build-arg BASE_IMAGE=ubuntu:24.04 ...
 #   docker build --build-arg BASE_IMAGE=debian:bookworm ...
 #
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=debian:trixie
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive

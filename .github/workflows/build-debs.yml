@@ -48,6 +48,7 @@ jobs:
         run: |
           docker build \
             --platform linux/arm64 \
+            --build-arg BASE_IMAGE=debian:trixie \
             -f docker/Dockerfile \
             -t rk3588-media-builder:arm64 \
             .

@@ -152,6 +152,7 @@ class Config:
     ffmpeg_repo: str
     ffmpeg_ref: str
     ffmpeg_patch_url: str
+    ffmpeg_apply_patch: bool
     ffmpeg_package: str
 
     mpv_repo: str
@@ -222,7 +223,8 @@ def load_config(path: Path, args: argparse.Namespace) -> Config:
 
         ffmpeg_repo=get("ffmpeg", "repo"),
         ffmpeg_ref=args.ffmpeg_ref or get("ffmpeg", "ref", "master"),
-        ffmpeg_patch_url=args.ffmpeg_patch_url or get("ffmpeg", "v4l2request_patch_url"),
+        ffmpeg_patch_url=args.ffmpeg_patch_url or get("ffmpeg", "v4l2request_patch_url", ""),
+        ffmpeg_apply_patch=args.ffmpeg_apply_patch if args.ffmpeg_apply_patch is not None else get_bool("ffmpeg", "apply_patch", True),
         ffmpeg_package=get("ffmpeg", "package_name", "ffmpeg-v4l2request-rockchip"),
 
         mpv_repo=get("mpv", "repo"),
@@ -449,17 +451,24 @@ def build_ffmpeg(config: Config) -> None:
     run(["git", "reset", "--hard"], cwd=src)
     run(["git", "clean", "-xfd"], cwd=src)
 
-    patch_file = config.build_root / "ffmpeg-v4l2request.patch"
-    log("Downloading FFmpeg V4L2 Request patch")
-    run(["curl", "-L", config.ffmpeg_patch_url, "-o", str(patch_file)])
+    if config.ffmpeg_apply_patch:
+        if not config.ffmpeg_patch_url:
+            die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_patch_url is empty.")
 
-    log("Applying FFmpeg V4L2 Request patch")
-    result = run(["git", "apply", str(patch_file)], cwd=src, check=False)
-    if result.returncode != 0:
-        die(
-            f"FFmpeg patch failed against ref {config.ffmpeg_ref}. "
-            "Try a pinned known-good ref, for example --ffmpeg-ref n7.1."
-        )
+        patch_file = config.build_root / "ffmpeg-v4l2request.patch"
+        log("Downloading FFmpeg V4L2 Request patch")
+        run(["curl", "-L", config.ffmpeg_patch_url, "-o", str(patch_file)])
+
+        log("Applying FFmpeg V4L2 Request patch")
+        result = run(["git", "apply", str(patch_file)], cwd=src, check=False)
+        if result.returncode != 0:
+            die(
+                f"FFmpeg patch failed against ref {config.ffmpeg_ref}. "
+                "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
+                "or try a pinned known-good ref such as --ffmpeg-ref n7.1."
+            )
+    else:
+        log("Skipping FFmpeg V4L2 Request patch because ffmpeg.apply_patch = no")
 
     version = git_describe(src)
     prefix = str(config.install_prefix)
@@ -771,6 +780,11 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--ffmpeg-ref", help="Override FFmpeg git ref.")
     ap.add_argument("--ffmpeg-patch-url", help="Override FFmpeg v4l2request patch URL.")
+
+    ffmpeg_patch_group = ap.add_mutually_exclusive_group()
+    ffmpeg_patch_group.add_argument("--ffmpeg-apply-patch", dest="ffmpeg_apply_patch", action="store_true", help="Apply external FFmpeg v4l2request patch.")
+    ffmpeg_patch_group.add_argument("--ffmpeg-no-patch", dest="ffmpeg_apply_patch", action="store_false", help="Do not apply external FFmpeg v4l2request patch.")
+    ap.set_defaults(ffmpeg_apply_patch=None)
     ap.add_argument("--mpv-ref", help="Override mpv git ref.")
     ap.add_argument("--kodi-ref", help="Override Kodi git ref.")
 
