@@ -17,7 +17,9 @@ ENV PATH=/usr/lib/ccache:/usr/local/bin:/usr/bin:/bin
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     ca-certificates \
     curl \
@@ -97,8 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdisplay-info-dev \
     libdav1d-dev \
     && gem install --no-document fpm \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean
 
 RUN mkdir -p /work /build /output /ccache
 

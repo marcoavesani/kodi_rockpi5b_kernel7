@@ -6,19 +6,15 @@ on:
       ffmpeg_ref:
         description: "FFmpeg ref, tag, branch or commit"
         required: false
-        default: "master"
+        default: ""
       mpv_ref:
         description: "mpv ref, tag, branch or commit"
         required: false
-        default: "v4l2request"
+        default: ""
       kodi_ref:
         description: "Kodi ref, tag, branch or commit"
         required: false
-        default: "master"
-      target:
-        description: "Build target list"
-        required: false
-        default: "ffmpeg mpv kodi joystick"
+        default: ""
   push:
     branches:
       - main
@@ -30,14 +26,28 @@ on:
       - ".github/workflows/build-debs.yml"
 
 jobs:
-  build-arm64-debs:
-    name: Build ARM64 debs
+  build-ffmpeg:
+    name: Build FFmpeg deb (ARM64)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 1440
+    timeout-minutes: 720
+    permissions:
+      contents: read
+      actions: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rk3588-ccache
+          key: ${{ runner.os }}-arm64-rk3588-ccache-${{ hashFiles('build_rk3588_media_stack.py', 'rk3588-media-stack*.ini', 'docker/**') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-rk3588-ccache-
 
       - name: Prepare output/cache directories
         run: |
@@ -45,21 +55,31 @@ jobs:
           mkdir -p "${HOME}/.cache/rk3588-ccache"
 
       - name: Build builder image
-        run: |
-          docker build \
-            --platform linux/arm64 \
-            --build-arg BASE_IMAGE=debian:trixie \
-            -f docker/Dockerfile \
-            -t rk3588-media-builder:arm64 \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            BASE_IMAGE=debian:trixie
+          tags: rk3588-media-builder:arm64
+          load: true
+          cache-from: type=gha,scope=rk3588-builder-arm64
+          cache-to: type=gha,mode=max,scope=rk3588-builder-arm64
 
-      - name: Build deb packages
+      - name: Build FFmpeg deb package
         env:
-          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'master' }}
-          MPV_REF: ${{ github.event.inputs.mpv_ref || 'v4l2request' }}
-          KODI_REF: ${{ github.event.inputs.kodi_ref || 'master' }}
-          TARGETS: ${{ github.event.inputs.target || 'ffmpeg mpv kodi joystick' }}
+          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref }}
         run: |
+          # Intentionally no /build cache mount: source trees are cloned fresh every run.
+          extra_args=()
+          if [[ -n "${FFMPEG_REF:-}" ]]; then
+            echo "Using FFmpeg ref override: ${FFMPEG_REF}"
+            extra_args+=(--ffmpeg-ref "${FFMPEG_REF}")
+          else
+            echo "Using FFmpeg ref from config file"
+          fi
+
           docker run --rm \
             --platform linux/arm64 \
             -v "${{ github.workspace }}:/work" \
@@ -67,17 +87,226 @@ jobs:
             -v "${HOME}/.cache/rk3588-ccache:/ccache" \
             rk3588-media-builder:arm64 \
             --config /work/rk3588-media-stack.ci.ini \
-            --ffmpeg-ref "${FFMPEG_REF}" \
-            --mpv-ref "${MPV_REF}" \
-            --kodi-ref "${KODI_REF}" \
-            ${TARGETS}
+            "${extra_args[@]}" \
+            ffmpeg
 
       - name: List packages
         run: |
           ls -lh artifacts
           dpkg-deb -I artifacts/*.deb | sed -n '1,80p' || true
 
-      - name: Upload deb packages
+      - name: Upload FFmpeg deb packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-media-stack-ffmpeg-debs-arm64
+          path: artifacts/ffmpeg-v4l2request-rockchip_*.deb
+          if-no-files-found: error
+
+  build-mpv:
+    name: Build mpv deb (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 720
+    needs: build-ffmpeg
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rk3588-ccache
+          key: ${{ runner.os }}-arm64-rk3588-ccache-${{ hashFiles('build_rk3588_media_stack.py', 'rk3588-media-stack*.ini', 'docker/**') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-rk3588-ccache-
+
+      - name: Download FFmpeg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rk3588-media-stack-ffmpeg-debs-arm64
+          path: input-debs
+
+      - name: Prepare output/cache directories
+        run: |
+          mkdir -p artifacts
+          mkdir -p input-debs
+          mkdir -p "${HOME}/.cache/rk3588-ccache"
+
+      - name: Build builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            BASE_IMAGE=debian:trixie
+          tags: rk3588-media-builder:arm64
+          load: true
+          cache-from: type=gha,scope=rk3588-builder-arm64
+          cache-to: type=gha,mode=max,scope=rk3588-builder-arm64
+
+      - name: Build mpv deb package
+        env:
+          MPV_REF: ${{ github.event.inputs.mpv_ref }}
+        run: |
+          # Intentionally no /build cache mount: source trees are cloned fresh every run.
+          docker run --rm \
+            --platform linux/arm64 \
+            --entrypoint bash \
+            -e MPV_REF \
+            -v "${{ github.workspace }}:/work" \
+            -v "${{ github.workspace }}/artifacts:/output" \
+            -v "${{ github.workspace }}/input-debs:/input" \
+            -v "${HOME}/.cache/rk3588-ccache:/ccache" \
+            rk3588-media-builder:arm64 \
+            -lc 'set -euo pipefail
+                 dpkg -i /input/*.deb || apt-get -f install -y
+                 extra_args=()
+                 if [[ -n "${MPV_REF:-}" ]]; then
+                   echo "Using mpv ref override: ${MPV_REF}"
+                   extra_args+=(--mpv-ref "${MPV_REF}")
+                 else
+                   echo "Using mpv ref from config file"
+                 fi
+                 python3 /work/build_rk3588_media_stack.py \
+                   --config /work/rk3588-media-stack.ci.ini \
+                   "${extra_args[@]}" \
+                   mpv'
+
+      - name: List packages
+        run: |
+          ls -lh artifacts
+          dpkg-deb -I artifacts/*.deb | sed -n '1,80p' || true
+
+      - name: Upload mpv deb packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-media-stack-mpv-debs-arm64
+          path: artifacts/mpv-v4l2request-rockchip_*.deb
+          if-no-files-found: error
+
+  build-kodi:
+    name: Build Kodi debs (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 960
+    needs: build-ffmpeg
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rk3588-ccache
+          key: ${{ runner.os }}-arm64-rk3588-ccache-${{ hashFiles('build_rk3588_media_stack.py', 'rk3588-media-stack*.ini', 'docker/**') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-rk3588-ccache-
+
+      - name: Download FFmpeg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rk3588-media-stack-ffmpeg-debs-arm64
+          path: input-debs
+
+      - name: Prepare output/cache directories
+        run: |
+          mkdir -p artifacts
+          mkdir -p input-debs
+          mkdir -p "${HOME}/.cache/rk3588-ccache"
+
+      - name: Build builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            BASE_IMAGE=debian:trixie
+          tags: rk3588-media-builder:arm64
+          load: true
+          cache-from: type=gha,scope=rk3588-builder-arm64
+          cache-to: type=gha,mode=max,scope=rk3588-builder-arm64
+
+      - name: Build Kodi and joystick deb packages
+        env:
+          KODI_REF: ${{ github.event.inputs.kodi_ref }}
+        run: |
+          # Intentionally no /build cache mount: source trees are cloned fresh every run.
+          docker run --rm \
+            --platform linux/arm64 \
+            --entrypoint bash \
+            -e KODI_REF \
+            -v "${{ github.workspace }}:/work" \
+            -v "${{ github.workspace }}/artifacts:/output" \
+            -v "${{ github.workspace }}/input-debs:/input" \
+            -v "${HOME}/.cache/rk3588-ccache:/ccache" \
+            rk3588-media-builder:arm64 \
+            -lc 'set -euo pipefail
+                 dpkg -i /input/*.deb || apt-get -f install -y
+                 extra_args=()
+                 if [[ -n "${KODI_REF:-}" ]]; then
+                   echo "Using Kodi ref override: ${KODI_REF}"
+                   extra_args+=(--kodi-ref "${KODI_REF}")
+                 else
+                   echo "Using Kodi ref from config file"
+                 fi
+                 python3 /work/build_rk3588_media_stack.py \
+                   --config /work/rk3588-media-stack.ci.ini \
+                   "${extra_args[@]}" \
+                   kodi joystick'
+
+      - name: List packages
+        run: |
+          ls -lh artifacts
+          dpkg-deb -I artifacts/*.deb | sed -n '1,80p' || true
+
+      - name: Upload Kodi deb packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-media-stack-kodi-debs-arm64
+          path: |
+            artifacts/kodi-v4l2request-rockchip_*.deb
+            artifacts/kodi-v4l2request-peripheral-joystick-rockchip_*.deb
+          if-no-files-found: error
+
+  bundle-debs:
+    name: Bundle all deb artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - build-ffmpeg
+      - build-mpv
+      - build-kodi
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Download all per-component artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rk3588-media-stack-*-debs-arm64
+          path: artifacts
+          merge-multiple: true
+
+      - name: List bundled packages
+        run: |
+          ls -lh artifacts
+          dpkg-deb -I artifacts/*.deb | sed -n '1,80p' || true
+
+      - name: Upload combined deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: rk3588-media-stack-debs-arm64
