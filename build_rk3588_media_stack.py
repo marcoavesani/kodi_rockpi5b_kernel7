@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -344,6 +345,94 @@ def base_env(config: Config) -> dict[str, str]:
     return env
 
 
+def parse_version_parts(version: str) -> list[int]:
+    return [int(x) for x in re.findall(r"\d+", version)]
+
+
+def version_gte(found: str, minimum: str) -> bool:
+    a = parse_version_parts(found)
+    b = parse_version_parts(minimum)
+    max_len = max(len(a), len(b))
+    a.extend([0] * (max_len - len(a)))
+    b.extend([0] * (max_len - len(b)))
+    return a >= b
+
+
+def pkg_config_modversion(name: str, env: dict[str, str]) -> str | None:
+    result = subprocess.run(
+        ["pkg-config", "--modversion", name],
+        env=env,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def ensure_libplacebo(config: Config, minimum: str = "7.360.1") -> None:
+    env = base_env(config)
+    current = pkg_config_modversion("libplacebo", env)
+    if current and version_gte(current, minimum):
+        log(f"Using libplacebo {current}")
+        return
+
+    if current:
+        warn(f"libplacebo {current} is too old, need >= {minimum}; building from source.")
+    else:
+        warn("libplacebo not found via pkg-config; building from source.")
+
+    build_libplacebo_from_source(config, minimum)
+
+    updated = pkg_config_modversion("libplacebo", base_env(config))
+    if not updated or not version_gte(updated, minimum):
+        die(f"libplacebo >= {minimum} is required for mpv, found: {updated or 'none'}")
+
+
+def build_libplacebo_from_source(config: Config, minimum: str) -> None:
+    src = config.build_root / "libplacebo"
+    build = src / "build"
+    prefix = str(config.install_prefix)
+
+    if not (src / ".git").exists():
+        log(f"Cloning libplacebo into {src}")
+        src.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", "https://github.com/haasn/libplacebo.git", str(src)])
+
+    run(["git", "fetch", "--all", "--tags", "--prune"], cwd=src)
+
+    tag = f"v{minimum}"
+    has_tag = run(["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"], cwd=src, check=False).returncode == 0
+    if has_tag:
+        run(["git", "checkout", "tags/" + tag], cwd=src)
+    else:
+        warn(f"Requested libplacebo tag {tag} not found; using latest origin/master.")
+        run(["git", "checkout", "master"], cwd=src)
+        run(["git", "pull", "--ff-only"], cwd=src, check=False)
+
+    shutil.rmtree(build, ignore_errors=True)
+
+    env = base_env(config)
+    setup_cmd = [
+        "meson", "setup", "build",
+        f"--prefix={prefix}",
+        "-Ddefault_library=shared",
+        "-Ddemos=false",
+        "-Dvulkan=disabled",
+    ]
+    result = run(setup_cmd, cwd=src, env=env, check=False)
+    if result.returncode != 0:
+        warn("libplacebo Meson setup failed with custom options; retrying with minimal options.")
+        shutil.rmtree(build, ignore_errors=True)
+        run(["meson", "setup", "build", f"--prefix={prefix}"], cwd=src, env=env)
+
+    run(["ninja", "-C", "build", f"-j{config.jobs}"], cwd=src, env=env)
+    run(["meson", "install", "-C", "build"], cwd=src, env=env)
+    run([config.sudo, "ldconfig"], check=False)
+
+
 def require_fpm(config: Config) -> None:
     if shutil.which("fpm"):
         return
@@ -556,6 +645,8 @@ def build_mpv(config: Config) -> None:
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True, exist_ok=True)
 
+    ensure_libplacebo(config, minimum="7.360.1")
+
     git_checkout(config.mpv_repo, src, config.mpv_ref)
     version = git_describe(src)
 
@@ -633,12 +724,15 @@ def build_kodi(config: Config) -> None:
     git_checkout(config.kodi_repo, src, config.kodi_ref)
     version = git_describe(src)
 
+    build_gtest_from_source(config)
+
     prefix = str(config.install_prefix)
     env = base_env(config)
 
     cmake_cmd = [
         "cmake", str(src),
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
+        f"-DCMAKE_PREFIX_PATH={prefix}",
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCORE_PLATFORM_NAME=gbm",
         "-DAPP_RENDER_SYSTEM=gles",
@@ -695,6 +789,37 @@ def build_kodi(config: Config) -> None:
             for line in out.splitlines():
                 if any(x in line for x in ["libavcodec", "libavformat", "libavutil", "libswscale", "libswresample"]):
                     print(line)
+
+
+def build_gtest_from_source(config: Config) -> None:
+    src = config.build_root / "googletest"
+    build = config.build_root / "googletest-build"
+    prefix = str(config.install_prefix)
+
+    log("Preparing GoogleTest from source")
+    git_checkout("https://github.com/google/googletest.git", src, "v1.14.0")
+
+    shutil.rmtree(build, ignore_errors=True)
+    build.mkdir(parents=True, exist_ok=True)
+
+    env = base_env(config)
+    cmake_cmd = [
+        "cmake", str(src),
+        f"-DCMAKE_INSTALL_PREFIX={prefix}",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_GMOCK=OFF",
+        "-Dgtest_build_tests=OFF",
+        "-DINSTALL_GTEST=ON",
+    ]
+
+    log("Configuring GoogleTest")
+    run(cmake_cmd, cwd=build, env=env)
+
+    log("Building GoogleTest")
+    run(["cmake", "--build", ".", "--", f"-j{config.jobs}"], cwd=build, env=env)
+
+    log("Installing GoogleTest")
+    run(["cmake", "--install", "."], cwd=build, env=env)
 
 
 def build_joystick(config: Config) -> None:
