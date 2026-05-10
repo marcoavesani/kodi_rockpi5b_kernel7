@@ -476,17 +476,39 @@ def build_ffmpeg(config: Config) -> None:
     # Some FFmpeg forks/branches drop or rename configure flags.
     # Probe supported options first to avoid cryptic configure failures.
     configure_help = capture(["./configure", "--help"], cwd=src, check=False)
-    if "--enable-v4l2-request" not in configure_help:
-        die(
-            f"FFmpeg ref {config.ffmpeg_ref} does not support --enable-v4l2-request. "
-            "Use a v4l2request-capable FFmpeg ref or enable the external patch."
-        )
 
     optional_flags: list[str] = []
+    if "--enable-v4l2-request" in configure_help:
+        optional_flags.append("--enable-v4l2-request")
+    else:
+        warn("FFmpeg configure option --enable-v4l2-request is not supported by this ref; skipping it.")
+
     if "--enable-postproc" in configure_help:
         optional_flags.append("--enable-postproc")
     else:
         warn("FFmpeg configure option --enable-postproc is not supported by this ref; skipping it.")
+
+    hwaccel_flags: list[str] = []
+    if "h264_v4l2request" in configure_help:
+        hwaccel_flags.append("--enable-hwaccel=h264_v4l2request")
+    else:
+        warn("FFmpeg hwaccel h264_v4l2request not listed by configure; skipping explicit enable flag.")
+
+    if "hevc_v4l2request" in configure_help:
+        hwaccel_flags.append("--enable-hwaccel=hevc_v4l2request")
+    else:
+        warn("FFmpeg hwaccel hevc_v4l2request not listed by configure; skipping explicit enable flag.")
+
+    has_v4l2request_code = subprocess.run(
+        ["git", "grep", "-q", "v4l2_request", "libavcodec", "libavutil"],
+        cwd=src,
+        check=False,
+    ).returncode == 0
+    if not has_v4l2request_code and not hwaccel_flags:
+        die(
+            f"FFmpeg ref {config.ffmpeg_ref} does not appear to contain V4L2 Request support. "
+            "Use a v4l2request-capable FFmpeg ref or enable the external patch."
+        )
 
     configure = [
         "./configure",
@@ -495,13 +517,11 @@ def build_ffmpeg(config: Config) -> None:
         "--enable-shared",
         "--disable-static",
         "--enable-libdrm",
-        "--enable-v4l2-request",
         *optional_flags,
         "--enable-pthreads",
         "--enable-decoder=h264",
         "--enable-decoder=hevc",
-        "--enable-hwaccel=h264_v4l2request",
-        "--enable-hwaccel=hevc_v4l2request",
+        *hwaccel_flags,
         *config.ffmpeg_configure_extra,
     ]
 
