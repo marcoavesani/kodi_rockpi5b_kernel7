@@ -453,6 +453,16 @@ def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) 
     run(["git", "clean", "-xfd"], cwd=src)
 
     env = base_env(config)
+
+    # The standalone michaelni/libpostproc repo does not ship every internal
+    # FFmpeg header it transitively needs (e.g. mathops.h via fixed_dsp.h).
+    # If the FFmpeg source tree is already present, inject it into CFLAGS so
+    # the compiler can find those missing internal headers.
+    ffmpeg_src = config.build_root / "ffmpeg"
+    if ffmpeg_src.is_dir():
+        existing_cflags = env.get("CFLAGS", "")
+        env["CFLAGS"] = f"-I{ffmpeg_src} {existing_cflags}".strip()
+
     configure = [
         "./configure",
         f"--prefix={prefix}",
