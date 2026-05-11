@@ -10,7 +10,7 @@ This version uses:
   - upstream-style default install prefix: /usr/local
 
 Default targets:
-  deps, ffmpeg, mpv, kodi, joystick
+    deps, ffmpeg, libplacebo, libpostproc, mpv, kodi, joystick
 
 Examples:
   ./build_rk3588_media_stack.py --config rk3588-media-stack.ini all
@@ -159,6 +159,7 @@ class Config:
     mpv_repo: str
     mpv_ref: str
     mpv_package: str
+    libplacebo_package: str
 
     kodi_repo: str
     kodi_ref: str
@@ -231,6 +232,7 @@ def load_config(path: Path, args: argparse.Namespace) -> Config:
         mpv_repo=get("mpv", "repo"),
         mpv_ref=args.mpv_ref or get("mpv", "ref", "v4l2request"),
         mpv_package=get("mpv", "package_name", "mpv-v4l2request-rockchip"),
+        libplacebo_package=get("mpv", "libplacebo_package", "libplacebo-rockchip"),
 
         kodi_repo=get("kodi", "repo"),
         kodi_ref=args.kodi_ref or get("kodi", "ref", "master"),
@@ -384,14 +386,17 @@ def ensure_libplacebo(config: Config, minimum: str = "7.360.1") -> None:
     else:
         warn("libplacebo not found via pkg-config; building from source.")
 
-    build_libplacebo_from_source(config, minimum)
+    if config.build_debs:
+        build_libplacebo(config, minimum)
+    else:
+        build_libplacebo_from_source(config, minimum)
 
     updated = pkg_config_modversion("libplacebo", base_env(config))
     if not updated or not version_gte(updated, minimum):
         die(f"libplacebo >= {minimum} is required for mpv, found: {updated or 'none'}")
 
 
-def build_libplacebo_from_source(config: Config, minimum: str) -> None:
+def build_libplacebo_from_source(config: Config, minimum: str, *, stage: Path | None = None) -> str:
     src = config.build_root / "libplacebo"
     build = src / "build"
     prefix = str(config.install_prefix)
@@ -439,8 +444,31 @@ def build_libplacebo_from_source(config: Config, minimum: str) -> None:
         run(["meson", "setup", "build", f"--prefix={prefix}"], cwd=src, env=env)
 
     run(["ninja", "-C", "build", f"-j{config.jobs}"], cwd=src, env=env)
-    run(["meson", "install", "-C", "build"], cwd=src, env=env)
-    run([config.sudo, "ldconfig"], check=False)
+    if stage is None:
+        run(["meson", "install", "-C", "build"], cwd=src, env=env)
+        run([config.sudo, "ldconfig"], check=False)
+    else:
+        env_stage = env.copy()
+        env_stage["DESTDIR"] = str(stage)
+        run(["meson", "install", "-C", "build"], cwd=src, env=env_stage)
+
+    return git_describe(src)
+
+
+def build_libplacebo(config: Config, minimum: str = "7.360.1") -> None:
+    stage = config.build_root / "stage" / "libplacebo"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True, exist_ok=True)
+
+    version = build_libplacebo_from_source(config, minimum, stage=stage)
+    maybe_package_or_install(
+        config,
+        package=config.libplacebo_package,
+        version=version,
+        stage=stage,
+        description="External libplacebo package for mpv and Kodi builds",
+        depends=[],
+    )
 
 
 def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) -> str:
@@ -742,7 +770,7 @@ def build_mpv(config: Config) -> None:
         "-Dgbm=enabled",
         "-Degl-drm=enabled",
         "-Dgl=enabled",
-        "-Dwayland=disabled",
+        "-Dwayland=enabled",
         "-Dx11=disabled",
         *config.mpv_meson_extra,
     ]
@@ -777,7 +805,7 @@ def build_mpv(config: Config) -> None:
         version=version,
         stage=stage,
         description="mpv with V4L2 Request hwdec support for Rockchip/RK3588",
-        depends=[config.ffmpeg_package],
+        depends=[config.ffmpeg_package, config.libplacebo_package],
     )
 
     log("Verifying mpv")
@@ -798,6 +826,8 @@ def build_kodi(config: Config) -> None:
     shutil.rmtree(stage, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
     stage.mkdir(parents=True, exist_ok=True)
+
+    ensure_libplacebo(config, minimum="7.360.1")
 
     git_checkout(config.kodi_repo, src, config.kodi_ref)
     version = git_describe(src)
@@ -1016,7 +1046,7 @@ def parse_args() -> argparse.Namespace:
         "targets",
         nargs="*",
         default=["all"],
-        choices=["deps", "ffmpeg", "libpostproc", "mpv", "kodi", "joystick", "all"],
+        choices=["deps", "ffmpeg", "libplacebo", "libpostproc", "mpv", "kodi", "joystick", "all"],
         help="Build targets to run.",
     )
 
@@ -1073,13 +1103,15 @@ def main() -> int:
 
         targets = args.targets
         if "all" in targets:
-            targets = ["deps", "ffmpeg", "libpostproc", "mpv", "kodi", "joystick"]
+            targets = ["deps", "ffmpeg", "libplacebo", "libpostproc", "mpv", "kodi", "joystick"]
 
         for target in targets:
             if target == "deps":
                 install_deps(config)
             elif target == "ffmpeg":
                 build_ffmpeg(config)
+            elif target == "libplacebo":
+                build_libplacebo(config)
             elif target == "libpostproc":
                 build_libpostproc(config)
             elif target == "mpv":
