@@ -91,6 +91,19 @@ jobs:
             "${extra_args[@]}" \
             ffmpeg
 
+      - name: Build libpostproc deb package (optional)
+        continue-on-error: true
+        run: |
+          # Keep libpostproc in the same job as FFmpeg so both share /build sources.
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "${{ github.workspace }}:/work" \
+            -v "${{ github.workspace }}/artifacts:/output" \
+            -v "${HOME}/.cache/rk3588-ccache:/ccache" \
+            rk3588-media-builder:arm64 \
+            --config /work/rk3588-media-stack.ci.ini \
+            libpostproc
+
       - name: List packages
         run: |
           ls -lh artifacts
@@ -102,6 +115,14 @@ jobs:
           name: rk3588-media-stack-ffmpeg-debs-arm64
           path: artifacts/ffmpeg-v4l2request-rockchip_*.deb
           if-no-files-found: error
+
+      - name: Upload libpostproc deb packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-media-stack-libpostproc-debs-arm64
+          path: artifacts/libpostproc-rockchip_*.deb
+          if-no-files-found: warn
 
   build-libplacebo:
     name: Build libplacebo deb (ARM64)
@@ -267,74 +288,6 @@ jobs:
           path: artifacts/mpv-v4l2request-rockchip_*.deb
           if-no-files-found: error
 
-  build-libpostproc:
-    name: Build libpostproc deb (ARM64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 480
-    needs: build-ffmpeg
-    continue-on-error: true
-    permissions:
-      contents: read
-      actions: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/rk3588-ccache
-          key: ${{ runner.os }}-arm64-rk3588-ccache-${{ hashFiles('build_rk3588_media_stack.py', 'rk3588-media-stack*.ini', 'docker/**') }}
-          restore-keys: |
-            ${{ runner.os }}-arm64-rk3588-ccache-
-
-      - name: Prepare output/cache directories
-        run: |
-          mkdir -p artifacts
-          mkdir -p "${HOME}/.cache/rk3588-ccache"
-
-      - name: Build builder image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/arm64
-          build-args: |
-            BASE_IMAGE=debian:trixie
-          tags: rk3588-media-builder:arm64
-          load: true
-          pull: true
-          cache-from: type=gha,scope=rk3588-builder-arm64
-          cache-to: type=gha,mode=max,scope=rk3588-builder-arm64
-
-      - name: Build libpostproc deb package
-        run: |
-          # Intentionally no /build cache mount: source trees are cloned fresh every run.
-          docker run --rm \
-            --platform linux/arm64 \
-            -v "${{ github.workspace }}:/work" \
-            -v "${{ github.workspace }}/artifacts:/output" \
-            -v "${HOME}/.cache/rk3588-ccache:/ccache" \
-            rk3588-media-builder:arm64 \
-            --config /work/rk3588-media-stack.ci.ini \
-            libpostproc
-
-      - name: List packages
-        run: |
-          ls -lh artifacts
-          dpkg-deb -I artifacts/*.deb | sed -n '1,80p' || true
-
-      - name: Upload libpostproc deb packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: rk3588-media-stack-libpostproc-debs-arm64
-          path: artifacts/libpostproc-rockchip_*.deb
-          if-no-files-found: warn
-
   build-kodi:
     name: Build Kodi debs (ARM64)
     runs-on: ubuntu-24.04-arm
@@ -342,7 +295,6 @@ jobs:
     needs:
       - build-ffmpeg
       - build-libplacebo
-      - build-libpostproc
     permissions:
       contents: read
       actions: read
@@ -416,7 +368,15 @@ jobs:
             -v "${HOME}/.cache/rk3588-ccache:/ccache" \
             rk3588-media-builder:arm64 \
             -lc 'set -euo pipefail
-                dpkg -i /input/libplacebo-rockchip_*.deb /input/libpostproc-rockchip_*.deb /input/ffmpeg-v4l2request-rockchip_*.deb || apt-get -f install -y
+                 shopt -s nullglob
+                 ffmpeg_debs=(/input/ffmpeg-v4l2request-rockchip_*.deb)
+                 libplacebo_debs=(/input/libplacebo-rockchip_*.deb)
+                 optional_debs=(/input/libpostproc-rockchip_*.deb)
+                 if (( ${#ffmpeg_debs[@]} == 0 || ${#libplacebo_debs[@]} == 0 )); then
+                   echo "Missing required ffmpeg/libplacebo artifacts in /input" >&2
+                   exit 1
+                 fi
+                 dpkg -i "${libplacebo_debs[@]}" "${optional_debs[@]}" "${ffmpeg_debs[@]}" || apt-get -f install -y
                  extra_args=()
                  if [[ -n "${KODI_REF:-}" ]]; then
                    echo "Using Kodi ref override: ${KODI_REF}"
