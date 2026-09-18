@@ -818,7 +818,7 @@ def build_mpv(config: Config) -> None:
     if mpv.exists():
         out = capture([str(mpv), "--hwdec=help"], env=env, check=False)
         print(out)
-        if not re.search(r"\bdrm\b", out):
+        if "drm" not in out.lower():
             warn("mpv was built, but --hwdec=help did not show drm (this check does not validate full DRM PRIME interop).")
 
 
@@ -1023,7 +1023,7 @@ Package output:
 
 Useful checks:
   {config.install_prefix}/bin/ffmpeg -hide_banner -hwaccels
-  {config.install_prefix}/bin/mpv --hwdec=help | grep -w drm
+  {config.install_prefix}/bin/mpv --hwdec=help | grep -i drm
   ldd {config.install_prefix}/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
   {config.install_prefix}/bin/kodi --standalone
 

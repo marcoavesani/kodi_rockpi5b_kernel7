@@ -143,7 +143,7 @@ Check:
 
 ```bash
 /usr/local/bin/ffmpeg -hide_banner -hwaccels
-/usr/local/bin/mpv --hwdec=help | grep -w drm
+/usr/local/bin/mpv --hwdec=help | grep -i drm
 ldd /usr/local/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
 ```
 
