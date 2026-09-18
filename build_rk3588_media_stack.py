@@ -20,7 +20,7 @@ Examples:
   ./build_rk3588_media_stack.py --kodi-ref master kodi joystick
 
 Notes:
-  - FFmpeg V4L2 Request support is patch-based here.
+  - FFmpeg V4L2 Request support is applied from Kwiboo's Git branch.
   - mpv uses upstream DRM PRIME hwdec paths.
   - "latest" can break. Pin known-good refs in the config or CLI options.
   - Debs produced by this script are local binary packages, not Debian source packages.
@@ -152,8 +152,10 @@ class Config:
 
     ffmpeg_repo: str
     ffmpeg_ref: str
-    ffmpeg_patch_url: str
     ffmpeg_apply_patch: bool
+    ffmpeg_v4l2request_repo: str
+    ffmpeg_v4l2request_ref: str
+    ffmpeg_v4l2request_commit: str
     ffmpeg_package: str
 
     mpv_repo: str
@@ -225,8 +227,10 @@ def load_config(path: Path, args: argparse.Namespace) -> Config:
 
         ffmpeg_repo=get("ffmpeg", "repo"),
         ffmpeg_ref=args.ffmpeg_ref or get("ffmpeg", "ref", "master"),
-        ffmpeg_patch_url=args.ffmpeg_patch_url or get("ffmpeg", "v4l2request_patch_url", ""),
         ffmpeg_apply_patch=args.ffmpeg_apply_patch if args.ffmpeg_apply_patch is not None else get_bool("ffmpeg", "apply_patch", True),
+        ffmpeg_v4l2request_repo=args.ffmpeg_v4l2request_repo or get("ffmpeg", "v4l2request_repo", "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"),
+        ffmpeg_v4l2request_ref=args.ffmpeg_v4l2request_ref or get("ffmpeg", "v4l2request_ref", "v4l2-request-n9.0"),
+        ffmpeg_v4l2request_commit=args.ffmpeg_v4l2request_commit or get("ffmpeg", "v4l2request_commit", ""),
         ffmpeg_package=get("ffmpeg", "package_name", "ffmpeg-v4l2request-rockchip"),
 
         mpv_repo=get("mpv", "repo"),
@@ -634,29 +638,84 @@ def build_ffmpeg(config: Config) -> None:
     run(["git", "clean", "-xfd"], cwd=src)
 
     if config.ffmpeg_apply_patch:
-        if not config.ffmpeg_patch_url:
-            die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_patch_url is empty.")
+        if not config.ffmpeg_v4l2request_repo:
+            die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_repo is empty.")
 
-        patch_file = config.build_root / "ffmpeg-v4l2request.patch"
-        log("Downloading FFmpeg V4L2 Request patch")
-        run(["curl", "-L", config.ffmpeg_patch_url, "-o", str(patch_file)])
+        remote_name = "v4l2request"
+        has_remote = run(["git", "remote", "get-url", remote_name], cwd=src, check=False).returncode == 0
+        if has_remote:
+            current_remote = capture(["git", "remote", "get-url", remote_name], cwd=src).strip()
+            if current_remote != config.ffmpeg_v4l2request_repo:
+                run(["git", "remote", "set-url", remote_name, config.ffmpeg_v4l2request_repo], cwd=src)
+        else:
+            run(["git", "remote", "add", remote_name, config.ffmpeg_v4l2request_repo], cwd=src)
 
-        log("Checking FFmpeg V4L2 Request patch")
-        result = run(
-            ["patch", "--dry-run", "--batch", "--forward", "-p1", "-i", str(patch_file)],
+        v4l2_ref_tip = ""
+        if config.ffmpeg_v4l2request_ref:
+            if not config.ffmpeg_v4l2request_commit:
+                warn(
+                    "ffmpeg.v4l2request_commit is not set; builds may become non-reproducible if "
+                    "ffmpeg.v4l2request_ref moves."
+                )
+            log(f"Fetching V4L2 Request branch {config.ffmpeg_v4l2request_ref}")
+            run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_ref], cwd=src)
+            v4l2_ref_tip = capture(["git", "rev-parse", "FETCH_HEAD"], cwd=src).strip()
+
+        if config.ffmpeg_v4l2request_commit:
+            pinned = f"{config.ffmpeg_v4l2request_commit}^{{commit}}"
+            has_pinned = run(["git", "cat-file", "-e", pinned], cwd=src, check=False).returncode == 0
+            if not has_pinned:
+                log(f"Fetching pinned V4L2 Request commit {config.ffmpeg_v4l2request_commit}")
+                run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_commit], cwd=src)
+            v4l2_tip = capture(["git", "rev-parse", pinned], cwd=src).strip()
+        else:
+            if not v4l2_ref_tip:
+                die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_ref is empty.")
+            v4l2_tip = v4l2_ref_tip
+
+        ffmpeg_checked_out_commit = capture(["git", "rev-parse", "HEAD"], cwd=src).strip()
+        head_contains_tip = run(
+            ["git", "merge-base", "--is-ancestor", v4l2_tip, ffmpeg_checked_out_commit],
             cwd=src,
             check=False,
-        )
-        if result.returncode != 0:
+        ).returncode == 0
+        tip_contains_head = run(
+            ["git", "merge-base", "--is-ancestor", ffmpeg_checked_out_commit, v4l2_tip],
+            cwd=src,
+            check=False,
+        ).returncode == 0
+
+        if head_contains_tip:
+            log("V4L2 Request commits are already present on the selected FFmpeg ref.")
+        elif not tip_contains_head:
             die(
-                f"FFmpeg V4L2 Request patch does not apply against {config.ffmpeg_ref}. "
-                "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
-                "or use the LibreELEC-matched FFmpeg ref --ffmpeg-ref n9.0."
+                f"V4L2 Request tip {v4l2_tip} is not compatible with FFmpeg ref {config.ffmpeg_ref}. "
+                "Refuse to cherry-pick because this would pull unrelated upstream FFmpeg commits. "
+                "Use a matching v4l2request_ref/v4l2request_commit."
             )
-        log("Applying FFmpeg V4L2 Request patch")
-        run(["patch", "--batch", "--forward", "-p1", "-i", str(patch_file)], cwd=src)
+        else:
+            commits = [
+                x.strip() for x in capture(
+                    ["git", "rev-list", "--reverse", f"{ffmpeg_checked_out_commit}..{v4l2_tip}"],
+                    cwd=src,
+                ).splitlines()
+                if x.strip()
+            ]
+            if not commits:
+                log("No V4L2 Request commits to cherry-pick.")
+            else:
+                commit_count = str(len(commits))
+                log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
+                result = run(["git", "cherry-pick", *commits], cwd=src, check=False)
+                if result.returncode != 0:
+                    run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
+                    die(
+                        f"Failed to cherry-pick V4L2 Request commits onto {config.ffmpeg_ref}. "
+                        "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
+                        "or pin ffmpeg.v4l2request_commit to a compatible commit."
+                    )
     else:
-        log("Skipping FFmpeg V4L2 Request patch because ffmpeg.apply_patch = no")
+        log("Skipping FFmpeg V4L2 Request commit integration because ffmpeg.apply_patch = no")
 
     version = git_describe(src)
     prefix = str(config.install_prefix)
@@ -1092,11 +1151,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--deb-maintainer", help="Debian package maintainer string.")
 
     ap.add_argument("--ffmpeg-ref", help="Override FFmpeg git ref.")
-    ap.add_argument("--ffmpeg-patch-url", help="Override FFmpeg v4l2request patch URL.")
+    ap.add_argument("--ffmpeg-v4l2request-repo", help="Override FFmpeg V4L2 Request remote repository.")
+    ap.add_argument("--ffmpeg-v4l2request-ref", help="Override FFmpeg V4L2 Request git ref.")
+    ap.add_argument("--ffmpeg-v4l2request-commit", help="Override FFmpeg V4L2 Request pinned commit.")
 
     ffmpeg_patch_group = ap.add_mutually_exclusive_group()
-    ffmpeg_patch_group.add_argument("--ffmpeg-apply-patch", dest="ffmpeg_apply_patch", action="store_true", help="Apply external FFmpeg v4l2request patch.")
-    ffmpeg_patch_group.add_argument("--ffmpeg-no-patch", dest="ffmpeg_apply_patch", action="store_false", help="Do not apply external FFmpeg v4l2request patch.")
+    ffmpeg_patch_group.add_argument("--ffmpeg-apply-patch", dest="ffmpeg_apply_patch", action="store_true", help="Apply external FFmpeg V4L2 Request commit series.")
+    ffmpeg_patch_group.add_argument("--ffmpeg-no-patch", dest="ffmpeg_apply_patch", action="store_false", help="Do not apply external FFmpeg V4L2 Request commit series.")
     ap.set_defaults(ffmpeg_apply_patch=None)
     ap.add_argument("--mpv-ref", help="Override mpv git ref.")
     ap.add_argument("--kodi-ref", help="Override Kodi git ref.")

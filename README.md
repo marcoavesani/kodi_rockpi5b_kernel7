@@ -2,7 +2,7 @@
 
 This repository builds ARM64 `.deb` packages for a ROCK Pi 5B / RK3588 media stack:
 
-- upstream FFmpeg `n9.0` + external LibreELEC V4L2 Request patch
+- upstream FFmpeg `n9.0` + external Kwiboo V4L2 Request commits
 - upstream mpv `v0.41.0` using DRM PRIME hwdec (`--hwdec=drm`)
 - upstream Kodi `v22.0b2-Piers` linked against that FFmpeg
 - optional Kodi `peripheral.joystick`
@@ -81,7 +81,7 @@ rk3588-media-stack-debs-arm64
 
 ## Using an FFmpeg repo that already includes V4L2 Request
 
-If your FFmpeg repository/branch already has V4L2 Request support, disable the external patch in `rk3588-media-stack.ci.ini`:
+If your FFmpeg repository/branch already has V4L2 Request support, disable external V4L2 Request commit integration in `rk3588-media-stack.ci.ini`:
 
 ```ini
 [ffmpeg]
@@ -109,6 +109,28 @@ The script will still configure FFmpeg with:
 ```
 
 so your FFmpeg tree must provide those configure options.
+
+## Default V4L2 Request source (Kwiboo branch)
+
+By default, the builder checks out upstream FFmpeg `n9.0`, then:
+
+- fetches `https://code.ffmpeg.org/Kwiboo/FFmpeg.git`
+- resolves `v4l2-request-n9.0` (or `v4l2request_commit` when pinned)
+- verifies ancestry with the checked-out FFmpeg commit
+- cherry-picks only commits missing from the checked-out FFmpeg commit
+
+Default config:
+
+```ini
+[ffmpeg]
+ref = n9.0
+apply_patch = yes
+v4l2request_repo = https://code.ffmpeg.org/Kwiboo/FFmpeg.git
+v4l2request_ref = v4l2-request-n9.0
+v4l2request_commit =
+```
+
+Set `v4l2request_commit` to a specific commit SHA to keep builds reproducible even if the branch tip changes; when set, the pinned commit is used as the integration tip.
 
 ## Pinning known-good versions
 
