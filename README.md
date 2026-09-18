@@ -150,7 +150,12 @@ ldd /usr/local/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
 For runtime verification, use:
 
 ```bash
-/usr/local/bin/mpv -v --hwdec=drm sample-hevc.mkv
+/usr/local/bin/mpv -v \
+  --vo=gpu-next \
+  --gpu-context=drm \
+  --hwdec=drm \
+  --gpu-hwdec-interop=drmprime-overlay \
+  sample-hevc.mkv
 ```
 
 and confirm output includes DRM PRIME decoding paths (for example `Requesting pixfmt 'drm_prime'` and `Using hardware decoding (drm)`).
