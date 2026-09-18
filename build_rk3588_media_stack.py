@@ -818,7 +818,8 @@ def build_mpv(config: Config) -> None:
     if mpv.exists():
         out = capture([str(mpv), "--hwdec=help"], env=env, check=False)
         print(out)
-        has_drm_hwdec = re.search(r"(?im)^\s*drm(?:-copy)?\s*$", out) is not None
+        hwdec_tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]*", out)}
+        has_drm_hwdec = "drm" in hwdec_tokens or "drm-copy" in hwdec_tokens
         if not has_drm_hwdec:
             warn("mpv was built, but --hwdec=help did not list drm/drm-copy hwdec entries (this check does not validate full DRM PRIME interop).")
 
