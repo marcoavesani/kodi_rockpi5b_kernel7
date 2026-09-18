@@ -687,16 +687,26 @@ def build_ffmpeg(config: Config) -> None:
         if v4l2_base == v4l2_tip:
             log("V4L2 Request commits are already present on the selected FFmpeg ref.")
         else:
-            commit_count = capture(["git", "rev-list", "--count", f"{ffmpeg_checked_out_commit}..{v4l2_tip}"], cwd=src).strip()
-            log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
-            result = run(["git", "cherry-pick", f"{ffmpeg_checked_out_commit}..{v4l2_tip}"], cwd=src, check=False)
-            if result.returncode != 0:
-                run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
-                die(
-                    f"Failed to cherry-pick V4L2 Request commits onto {config.ffmpeg_ref}. "
-                    "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
-                    "or pin ffmpeg.v4l2request_commit to a compatible commit."
-                )
+            commits = [
+                x.strip() for x in capture(
+                    ["git", "rev-list", "--reverse", f"{ffmpeg_checked_out_commit}..{v4l2_tip}"],
+                    cwd=src,
+                ).splitlines()
+                if x.strip()
+            ]
+            if not commits:
+                log("No V4L2 Request commits to cherry-pick.")
+            else:
+                commit_count = str(len(commits))
+                log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
+                result = run(["git", "cherry-pick", *commits], cwd=src, check=False)
+                if result.returncode != 0:
+                    run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
+                    die(
+                        f"Failed to cherry-pick V4L2 Request commits onto {config.ffmpeg_ref}. "
+                        "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
+                        "or pin ffmpeg.v4l2request_commit to a compatible commit."
+                    )
     else:
         log("Skipping FFmpeg V4L2 Request commit integration because ffmpeg.apply_patch = no")
 
