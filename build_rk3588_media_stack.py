@@ -673,13 +673,13 @@ def build_ffmpeg(config: Config) -> None:
                 die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_ref is empty.")
             v4l2_tip = v4l2_ref_tip
 
-        ffmpeg_head = capture(["git", "rev-parse", "HEAD"], cwd=src).strip()
-        v4l2_base = capture(["git", "merge-base", "HEAD", v4l2_tip], cwd=src).strip()
+        ffmpeg_ref_commit = capture(["git", "rev-parse", config.ffmpeg_ref], cwd=src).strip()
+        v4l2_base = capture(["git", "merge-base", ffmpeg_ref_commit, v4l2_tip], cwd=src).strip()
         if not v4l2_base:
             die(f"Could not compute merge-base between {config.ffmpeg_ref} and V4L2 Request tip {v4l2_tip}.")
-        if v4l2_base != ffmpeg_head:
+        if v4l2_base != ffmpeg_ref_commit:
             die(
-                f"V4L2 Request tip {v4l2_tip} is not based on FFmpeg ref {config.ffmpeg_ref}. "
+                f"V4L2 Request tip {v4l2_tip} is not based exactly on FFmpeg ref {config.ffmpeg_ref}. "
                 "Refuse to cherry-pick because this would pull unrelated upstream FFmpeg commits. "
                 "Use a matching v4l2request_ref/v4l2request_commit."
             )
@@ -687,9 +687,9 @@ def build_ffmpeg(config: Config) -> None:
         if v4l2_base == v4l2_tip:
             log("V4L2 Request commits are already present on the selected FFmpeg ref.")
         else:
-            commit_count = capture(["git", "rev-list", "--count", f"{ffmpeg_head}..{v4l2_tip}"], cwd=src).strip()
+            commit_count = capture(["git", "rev-list", "--count", f"{ffmpeg_ref_commit}..{v4l2_tip}"], cwd=src).strip()
             log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
-            result = run(["git", "cherry-pick", f"{ffmpeg_head}..{v4l2_tip}"], cwd=src, check=False)
+            result = run(["git", "cherry-pick", f"{ffmpeg_ref_commit}..{v4l2_tip}"], cwd=src, check=False)
             if result.returncode != 0:
                 run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
                 die(

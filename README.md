@@ -116,8 +116,8 @@ By default, the builder checks out upstream FFmpeg `n9.0`, then:
 
 - fetches `https://code.ffmpeg.org/Kwiboo/FFmpeg.git`
 - resolves `v4l2-request-n9.0`
-- computes merge-base with upstream `n9.0`
-- cherry-picks all V4L2 Request commits from that base to the fetched tip
+- verifies the branch tip is based exactly on upstream `n9.0`
+- cherry-picks all commits between `n9.0` and the fetched tip
 
 Default config:
 
