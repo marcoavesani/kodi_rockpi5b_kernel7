@@ -2,7 +2,7 @@
 
 This repository builds ARM64 `.deb` packages for a ROCK Pi 5B / RK3588 media stack:
 
-- upstream FFmpeg `n9.0.1` + external V4L2 Request patch
+- upstream FFmpeg `n9.0` + external LibreELEC V4L2 Request patch
 - upstream mpv `v0.41.0` using DRM PRIME hwdec (`--hwdec=drm`)
 - upstream Kodi `v22.0b2-Piers` linked against that FFmpeg
 - optional Kodi `peripheral.joystick`
@@ -67,7 +67,7 @@ Actions -> Build RK3588 media stack debs -> Run workflow
 You can override the refs in the workflow form:
 
 ```text
-FFmpeg ref: git ref (tag/branch/commit), for example n9.0.1
+FFmpeg ref: git ref (tag/branch/commit), for example n9.0
 mpv ref:    git ref (tag/branch/commit), for example v0.41.0
 Kodi ref:   git ref (tag/branch/commit), for example v22.0b2-Piers
 ```
@@ -116,7 +116,7 @@ Edit `rk3588-media-stack.ci.ini`:
 
 ```ini
 [ffmpeg]
-ref = n9.0.1
+ref = n9.0
 
 [mpv]
 ref = v0.41.0
