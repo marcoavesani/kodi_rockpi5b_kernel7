@@ -16,7 +16,7 @@ Examples:
   ./build_rk3588_media_stack.py --config rk3588-media-stack.ini all
   ./build_rk3588_media_stack.py ffmpeg mpv
   ./build_rk3588_media_stack.py --no-debs --install-direct all
-  ./build_rk3588_media_stack.py --ffmpeg-ref n7.1 ffmpeg
+  ./build_rk3588_media_stack.py --ffmpeg-ref n9.0 ffmpeg
   ./build_rk3588_media_stack.py --kodi-ref master kodi joystick
 
 Notes:
@@ -280,7 +280,7 @@ def install_deps(config: Config) -> None:
     run([config.sudo, "apt-get", "update"])
 
     required = [
-        "build-essential", "git", "curl", "ca-certificates", "pkg-config",
+        "build-essential", "patch", "git", "curl", "ca-certificates", "pkg-config",
         "cmake", "ninja-build", "meson", "autoconf", "automake", "libtool",
         "gettext", "gawk", "gperf", "zip", "unzip", "python3", "python3-dev",
         "python3-pip", "swig", "default-jre", "ccache", "yasm", "nasm",
@@ -641,14 +641,20 @@ def build_ffmpeg(config: Config) -> None:
         log("Downloading FFmpeg V4L2 Request patch")
         run(["curl", "-L", config.ffmpeg_patch_url, "-o", str(patch_file)])
 
-        log("Applying FFmpeg V4L2 Request patch")
-        result = run(["git", "apply", str(patch_file)], cwd=src, check=False)
+        log("Checking FFmpeg V4L2 Request patch")
+        result = run(
+            ["patch", "--dry-run", "--batch", "--forward", "-p1", "-i", str(patch_file)],
+            cwd=src,
+            check=False,
+        )
         if result.returncode != 0:
             die(
-                f"FFmpeg patch failed against ref {config.ffmpeg_ref}. "
+                f"FFmpeg V4L2 Request patch does not apply against {config.ffmpeg_ref}. "
                 "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
-                "or try a pinned known-good ref such as --ffmpeg-ref n7.1."
+                "or use the LibreELEC-matched FFmpeg ref --ffmpeg-ref n9.0."
             )
+        log("Applying FFmpeg V4L2 Request patch")
+        run(["patch", "--batch", "--forward", "-p1", "-i", str(patch_file)], cwd=src)
     else:
         log("Skipping FFmpeg V4L2 Request patch because ffmpeg.apply_patch = no")
 
