@@ -21,7 +21,7 @@ Examples:
 
 Notes:
   - FFmpeg V4L2 Request support is patch-based here.
-  - mpv V4L2 Request support is branch/PR-based here.
+  - mpv uses upstream DRM PRIME hwdec paths.
   - "latest" can break. Pin known-good refs in the config or CLI options.
   - Debs produced by this script are local binary packages, not Debian source packages.
 """
@@ -230,12 +230,12 @@ def load_config(path: Path, args: argparse.Namespace) -> Config:
         ffmpeg_package=get("ffmpeg", "package_name", "ffmpeg-v4l2request-rockchip"),
 
         mpv_repo=get("mpv", "repo"),
-        mpv_ref=args.mpv_ref or get("mpv", "ref", "v4l2request"),
+        mpv_ref=args.mpv_ref or get("mpv", "ref", "v0.41.0"),
         mpv_package=get("mpv", "package_name", "mpv-v4l2request-rockchip"),
         libplacebo_package=get("mpv", "libplacebo_package", "libplacebo-rockchip"),
 
         kodi_repo=get("kodi", "repo"),
-        kodi_ref=args.kodi_ref or get("kodi", "ref", "master"),
+        kodi_ref=args.kodi_ref or get("kodi", "ref", "v22.0b2-Piers"),
         kodi_package=get("kodi", "package_name", "kodi-v4l2request-rockchip"),
 
         joystick_package=get("kodi", "joystick_package_name", "kodi-v4l2request-peripheral-joystick-rockchip"),
@@ -762,16 +762,21 @@ def build_mpv(config: Config) -> None:
     prefix = str(config.install_prefix)
     env = base_env(config)
 
+    option_files = [src / "meson.options", src / "meson_options.txt"]
+    option_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in option_files if p.exists())
+    has_v4l2request_opt = "option('v4l2request'" in option_text or 'option("v4l2request"' in option_text
+    has_egl_drm_opt = "option('egl-drm'" in option_text or 'option("egl-drm"' in option_text
+
     meson_cmd = [
         "meson", "setup", "build",
         f"--prefix={prefix}",
-        "-Dv4l2request=enabled",
         "-Ddrm=enabled",
         "-Dgbm=enabled",
-        "-Degl-drm=enabled",
         "-Dgl=enabled",
         "-Dwayland=enabled",
         "-Dx11=disabled",
+        *(["-Dv4l2request=enabled"] if has_v4l2request_opt else []),
+        *(["-Degl-drm=enabled"] if has_egl_drm_opt else []),
         *config.mpv_meson_extra,
     ]
 
@@ -783,10 +788,10 @@ def build_mpv(config: Config) -> None:
         reduced = [
             "meson", "setup", "build",
             f"--prefix={prefix}",
-            "-Dv4l2request=enabled",
             "-Ddrm=enabled",
             "-Dgbm=enabled",
             "-Dgl=enabled",
+            *(["-Dv4l2request=enabled"] if has_v4l2request_opt else []),
             *config.mpv_meson_extra,
         ]
         run(reduced, cwd=src, env=env)
@@ -813,8 +818,8 @@ def build_mpv(config: Config) -> None:
     if mpv.exists():
         out = capture([str(mpv), "--hwdec=help"], env=env, check=False)
         print(out)
-        if "v4l2request" not in out:
-            warn("mpv was built, but --hwdec=help did not show v4l2request.")
+        if not re.search(r"\bdrm(?:-copy)?\b", out):
+            warn("mpv was built, but --hwdec=help did not show drm/drm-copy.")
 
 
 def build_kodi(config: Config) -> None:
@@ -1018,7 +1023,7 @@ Package output:
 
 Useful checks:
   {config.install_prefix}/bin/ffmpeg -hide_banner -hwaccels
-  {config.install_prefix}/bin/mpv --hwdec=help | grep -i v4l2
+  {config.install_prefix}/bin/mpv --hwdec=help | grep -E 'drm|drm-copy'
   ldd {config.install_prefix}/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
   {config.install_prefix}/bin/kodi --standalone
 
@@ -1029,8 +1034,8 @@ mpv GBM/KMS test:
     --vo=gpu-next \\
     --drm-connector=HDMI-A-2 \\
     --drm-mode=1 \\
-    --hwdec=v4l2request \\
-    --gpu-hwdec-interop=v4l2request-overlay \\
+    --hwdec=drm \\
+    --gpu-hwdec-interop=drmprime-overlay \\
     --hwdec-software-fallback=no \\
     /path/to/video.mkv
 """)

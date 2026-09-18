@@ -2,9 +2,9 @@
 
 This repository builds ARM64 `.deb` packages for a ROCK Pi 5B / RK3588 media stack:
 
-- FFmpeg with V4L2 Request support
-- mpv with `--hwdec=v4l2request`
-- Kodi GBM/GLES linked against that FFmpeg
+- upstream FFmpeg `n9.0.1` + external V4L2 Request patch
+- upstream mpv `v0.41.0` using DRM PRIME hwdec (`--hwdec=drm`)
+- upstream Kodi `v22.0b2-Piers` linked against that FFmpeg
 - optional Kodi `peripheral.joystick`
 
 The build runs inside a Debian 13/Trixie Docker container and is intended for GitHub Actions ARM64 runners.
@@ -68,8 +68,8 @@ You can override the refs in the workflow form:
 
 ```text
 FFmpeg ref: master, n7.1, or a commit hash
-mpv ref:    v4l2request or a commit hash
-Kodi ref:   master, Omega, or a commit hash
+mpv ref:    v0.41.0 or a commit hash
+Kodi ref:   v22.0b2-Piers or a commit hash
 ```
 
 The generated packages are uploaded as the workflow artifact:
@@ -116,13 +116,13 @@ Edit `rk3588-media-stack.ci.ini`:
 
 ```ini
 [ffmpeg]
-ref = n7.1
+ref = n9.0.1
 
 [mpv]
-ref = v4l2request
+ref = v0.41.0
 
 [kodi]
-ref = master
+ref = v22.0b2-Piers
 ```
 
 or pass overrides in the workflow.
@@ -143,9 +143,17 @@ Check:
 
 ```bash
 /usr/local/bin/ffmpeg -hide_banner -hwaccels
-/usr/local/bin/mpv --hwdec=help | grep -i v4l2
+/usr/local/bin/mpv --hwdec=help | grep -E 'drm|drm-copy'
 ldd /usr/local/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
 ```
+
+For runtime verification, use:
+
+```bash
+/usr/local/bin/mpv -v --hwdec=drm sample-hevc.mkv
+```
+
+and confirm output includes DRM PRIME decoding paths (for example `Requesting pixfmt 'drm_prime'` and `Using hardware decoding (drm)`).
 
 ## Notes
 
