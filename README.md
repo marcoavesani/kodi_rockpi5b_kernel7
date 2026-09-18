@@ -160,7 +160,7 @@ For runtime verification, use:
   sample-hevc.mkv
 ```
 
-and confirm output includes DRM PRIME decoding paths (for example `Requesting pixfmt 'drm_prime'` and `Using hardware decoding (drm)`).
+and confirm output indicates DRM PRIME decode/render usage (for example `Requesting pixfmt 'drm_prime'` and log lines showing hardware decoding is active).
 
 ## Notes
 
