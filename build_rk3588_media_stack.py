@@ -674,14 +674,22 @@ def build_ffmpeg(config: Config) -> None:
             v4l2_tip = v4l2_ref_tip
 
         ffmpeg_checked_out_commit = capture(["git", "rev-parse", "HEAD"], cwd=src).strip()
-        v4l2_base = capture(["git", "merge-base", ffmpeg_checked_out_commit, v4l2_tip], cwd=src).strip()
-        if not v4l2_base:
-            die(f"Could not compute merge-base between {config.ffmpeg_ref} and V4L2 Request tip {v4l2_tip}.")
-        if v4l2_base == v4l2_tip:
+        head_contains_tip = run(
+            ["git", "merge-base", "--is-ancestor", v4l2_tip, ffmpeg_checked_out_commit],
+            cwd=src,
+            check=False,
+        ).returncode == 0
+        tip_contains_head = run(
+            ["git", "merge-base", "--is-ancestor", ffmpeg_checked_out_commit, v4l2_tip],
+            cwd=src,
+            check=False,
+        ).returncode == 0
+
+        if head_contains_tip:
             log("V4L2 Request commits are already present on the selected FFmpeg ref.")
-        elif v4l2_base != ffmpeg_checked_out_commit:
+        elif not tip_contains_head:
             die(
-                f"V4L2 Request tip {v4l2_tip} is not based exactly on FFmpeg ref {config.ffmpeg_ref}. "
+                f"V4L2 Request tip {v4l2_tip} is not compatible with FFmpeg ref {config.ffmpeg_ref}. "
                 "Refuse to cherry-pick because this would pull unrelated upstream FFmpeg commits. "
                 "Use a matching v4l2request_ref/v4l2request_commit."
             )
