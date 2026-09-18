@@ -823,7 +823,7 @@ def build_mpv(config: Config) -> None:
             line = re.sub(r"^[\s\-\*\u2022]+", "", raw_line.lower()).strip()
             if not line or line.endswith(":"):
                 continue
-            entry = line.split()[0].rstrip(",")
+            entry = line.split()[0].rstrip(",:")
             if entry in {"drm", "drm-copy"}:
                 has_drm_hwdec = True
                 break
