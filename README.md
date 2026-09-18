@@ -67,9 +67,9 @@ Actions -> Build RK3588 media stack debs -> Run workflow
 You can override the refs in the workflow form:
 
 ```text
-FFmpeg ref: master, n7.1, or a commit hash
-mpv ref:    v0.41.0 or a commit hash
-Kodi ref:   v22.0b2-Piers or a commit hash
+FFmpeg ref: git ref (tag/branch/commit), for example n9.0.1
+mpv ref:    git ref (tag/branch/commit), for example v0.41.0
+Kodi ref:   git ref (tag/branch/commit), for example v22.0b2-Piers
 ```
 
 The generated packages are uploaded as the workflow artifact:
