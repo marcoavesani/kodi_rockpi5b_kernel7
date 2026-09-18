@@ -820,7 +820,7 @@ def build_mpv(config: Config) -> None:
         print(out)
         has_drm_hwdec = False
         for raw_line in out.splitlines():
-            line = raw_line.strip().lower()
+            line = re.sub(r"^[\s\-\*\u2022]+", "", raw_line.lower()).strip()
             if not line or line.endswith(":"):
                 continue
             entry = line.split()[0].rstrip(",")
