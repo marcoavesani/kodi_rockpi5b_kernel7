@@ -650,30 +650,46 @@ def build_ffmpeg(config: Config) -> None:
         else:
             run(["git", "remote", "add", remote_name, config.ffmpeg_v4l2request_repo], cwd=src)
 
-        if config.ffmpeg_v4l2request_commit:
-            log(f"Fetching pinned V4L2 Request commit {config.ffmpeg_v4l2request_commit}")
-            run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_commit], cwd=src)
-        else:
-            if not config.ffmpeg_v4l2request_ref:
-                die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_ref is empty.")
-            warn(
-                "ffmpeg.v4l2request_commit is not set; builds may become non-reproducible if "
-                "ffmpeg.v4l2request_ref moves."
-            )
+        v4l2_ref_tip = ""
+        if config.ffmpeg_v4l2request_ref:
+            if not config.ffmpeg_v4l2request_commit:
+                warn(
+                    "ffmpeg.v4l2request_commit is not set; builds may become non-reproducible if "
+                    "ffmpeg.v4l2request_ref moves."
+                )
             log(f"Fetching V4L2 Request branch {config.ffmpeg_v4l2request_ref}")
             run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_ref], cwd=src)
+            v4l2_ref_tip = capture(["git", "rev-parse", "FETCH_HEAD"], cwd=src).strip()
 
-        v4l2_tip = capture(["git", "rev-parse", "FETCH_HEAD"], cwd=src).strip()
+        if config.ffmpeg_v4l2request_commit:
+            pinned = f"{config.ffmpeg_v4l2request_commit}^{{commit}}"
+            has_pinned = run(["git", "cat-file", "-e", pinned], cwd=src, check=False).returncode == 0
+            if not has_pinned:
+                log(f"Fetching pinned V4L2 Request commit {config.ffmpeg_v4l2request_commit}")
+                run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_commit], cwd=src)
+            v4l2_tip = capture(["git", "rev-parse", pinned], cwd=src).strip()
+        else:
+            if not v4l2_ref_tip:
+                die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_ref is empty.")
+            v4l2_tip = v4l2_ref_tip
+
+        ffmpeg_head = capture(["git", "rev-parse", "HEAD"], cwd=src).strip()
         v4l2_base = capture(["git", "merge-base", "HEAD", v4l2_tip], cwd=src).strip()
         if not v4l2_base:
             die(f"Could not compute merge-base between {config.ffmpeg_ref} and V4L2 Request tip {v4l2_tip}.")
+        if v4l2_base != ffmpeg_head:
+            die(
+                f"V4L2 Request tip {v4l2_tip} is not based on FFmpeg ref {config.ffmpeg_ref}. "
+                "Refuse to cherry-pick because this would pull unrelated upstream FFmpeg commits. "
+                "Use a matching v4l2request_ref/v4l2request_commit."
+            )
 
         if v4l2_base == v4l2_tip:
             log("V4L2 Request commits are already present on the selected FFmpeg ref.")
         else:
-            commit_count = capture(["git", "rev-list", "--count", f"{v4l2_base}..{v4l2_tip}"], cwd=src).strip()
+            commit_count = capture(["git", "rev-list", "--count", f"{ffmpeg_head}..{v4l2_tip}"], cwd=src).strip()
             log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
-            result = run(["git", "cherry-pick", f"{v4l2_base}..{v4l2_tip}"], cwd=src, check=False)
+            result = run(["git", "cherry-pick", f"{ffmpeg_head}..{v4l2_tip}"], cwd=src, check=False)
             if result.returncode != 0:
                 run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
                 die(
