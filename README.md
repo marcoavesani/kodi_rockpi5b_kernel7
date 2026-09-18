@@ -115,9 +115,9 @@ so your FFmpeg tree must provide those configure options.
 By default, the builder checks out upstream FFmpeg `n9.0`, then:
 
 - fetches `https://code.ffmpeg.org/Kwiboo/FFmpeg.git`
-- resolves `v4l2-request-n9.0`
-- verifies the branch tip is based exactly on upstream `n9.0`
-- cherry-picks all commits between `n9.0` and the fetched tip
+- resolves `v4l2-request-n9.0` (or `v4l2request_commit` when pinned)
+- verifies ancestry with the checked-out FFmpeg commit
+- cherry-picks only commits missing from the checked-out FFmpeg commit
 
 Default config:
 
@@ -130,7 +130,7 @@ v4l2request_ref = v4l2-request-n9.0
 v4l2request_commit =
 ```
 
-Set `v4l2request_commit` to a specific commit SHA to keep builds reproducible even if the branch tip changes.
+Set `v4l2request_commit` to a specific commit SHA to keep builds reproducible even if the branch tip changes; when set, the pinned commit is used as the integration tip.
 
 ## Pinning known-good versions
 
