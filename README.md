@@ -153,6 +153,8 @@ For runtime verification, use:
 /usr/local/bin/mpv -v \
   --vo=gpu-next \
   --gpu-context=drm \
+  --drm-connector=HDMI-A-2 \
+  --drm-mode=1 \
   --hwdec=drm \
   --gpu-hwdec-interop=drmprime-overlay \
   sample-hevc.mkv
