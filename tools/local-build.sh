@@ -23,12 +23,14 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 dir=${LOCAL_BUILD_DIR:-$repo/.local-build}
 root=$dir/rootfs
 image=${LOCAL_BUILD_IMAGE:-library/debian:trixie}
+# Same PATH as the container, so PATH-dependent problems show up locally too.
+container_path=$(sed -n 's/^ENV PATH=//p' "$repo/docker/Dockerfile")
 
 # Run a command as fake root inside the chroot, with the repo at /work.
 in_root() {
   unshare -r -m -p -f --kill-child bash -c '
     set -e
-    root=$1 repo=$2 dir=$3; shift 3
+    root=$1 repo=$2 dir=$3 path=$4; shift 4
     mount -t proc proc "$root/proc"
     mount --rbind /dev "$root/dev"
     mount --rbind /sys "$root/sys" 2>/dev/null || true
@@ -38,8 +40,8 @@ in_root() {
     mount --bind "$dir/ccache" "$root/ccache"
     exec chroot "$root" /usr/bin/env -i HOME=/root TERM="${TERM:-xterm}" LANG=C.UTF-8 \
       DEBIAN_FRONTEND=noninteractive CCACHE_DIR=/ccache \
-      PATH=/usr/lib/ccache:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin "$@"
-  ' _ "$root" "$repo" "$dir" "$@"
+      PATH="$path" "$@"
+  ' _ "$root" "$repo" "$dir" "${container_path:-/usr/local/bin:/usr/bin:/bin}" "$@"
 }
 
 docker_arch() {

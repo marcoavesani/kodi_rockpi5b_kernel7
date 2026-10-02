@@ -1144,6 +1144,12 @@ def main() -> int:
     try:
         config = load_config(Path(args.config).expanduser(), args)
 
+        if not config.sudo:
+            # sudo would use its secure_path; without it, dpkg still needs ldconfig etc. from sbin.
+            path = os.environ.get("PATH", "").split(os.pathsep)
+            missing = [d for d in ("/usr/local/sbin", "/usr/sbin", "/sbin") if d not in path]
+            os.environ["PATH"] = os.pathsep.join([*path, *missing])
+
         for cmd in ["git", "cmake", "make", "pkg-config"]:
             ensure_cmd(cmd)
 
