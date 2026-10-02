@@ -6,22 +6,23 @@ Build FFmpeg, mpv and Kodi for RK3588 mainline V4L2 Request / GBM.
 
 This version uses:
   - argparse for CLI options
-  - a separate INI config file for repos, refs, patch URL, prefixes and package names
+  - a separate INI config file for repos, refs, patch list, prefixes and package names
   - upstream-style default install prefix: /usr/local
 
 Default targets:
-    deps, ffmpeg, libplacebo, libpostproc, mpv, kodi, joystick
+    deps, ffmpeg, libplacebo, mpv, kodi, joystick
 
 Examples:
   ./build_rk3588_media_stack.py --config rk3588-media-stack.ini all
   ./build_rk3588_media_stack.py ffmpeg mpv
   ./build_rk3588_media_stack.py --no-debs --install-direct all
-  ./build_rk3588_media_stack.py --ffmpeg-ref n9.0 ffmpeg
+  ./build_rk3588_media_stack.py --ffmpeg-ref n9.0.2 ffmpeg
   ./build_rk3588_media_stack.py --kodi-ref master kodi joystick
 
 Notes:
-  - FFmpeg V4L2 Request support is applied from Kwiboo's Git branch.
-  - mpv uses upstream DRM PRIME hwdec paths.
+  - FFmpeg is upstream plus a pinned list of LibreELEC patch files
+    (V4L2 Request, libpostproc, RK3588 HEVC), applied with GNU patch.
+  - mpv is upstream plus the V4L2 Request hwdec commits of mpv PR #14690.
   - "latest" can break. Pin known-good refs in the config or CLI options.
   - Debs produced by this script are local binary packages, not Debian source packages.
 """
@@ -141,25 +142,50 @@ def sanitize_deb_version(version: str) -> str:
 
 
 @dataclass
+class PatchSet:
+    """Patch files applied in order on top of an upstream checkout."""
+    section: str
+    enabled: bool
+    base_url: str
+    commit: str
+    patches: list[str]
+    extra_patches: list[str]
+
+    def sources(self) -> list[tuple[str, str]]:
+        """Return (name, location) for every patch, in apply order."""
+        sources: list[tuple[str, str]] = []
+        if self.patches:
+            if not self.base_url:
+                die(f"{self.section}.patches is set but {self.section}.patch_base_url is empty.")
+            if "{commit}" in self.base_url and not self.commit:
+                die(f"{self.section}.patch_base_url uses {{commit}} but {self.section}.patch_commit is empty.")
+            base = self.base_url.format(commit=self.commit).rstrip("/")
+            for rel in self.patches:
+                sources.append((rel, f"{base}/{rel.lstrip('/')}"))
+        for extra in self.extra_patches:
+            sources.append((extra.rsplit("/", 1)[-1], extra))
+        return sources
+
+
+@dataclass
 class Config:
     build_root: Path
     package_output: Path
     install_prefix: Path
     deb_iteration: str
     deb_maintainer: str
-    sudo: str
+    sudo: list[str]
     jobs: int
 
     ffmpeg_repo: str
     ffmpeg_ref: str
-    ffmpeg_apply_patch: bool
-    ffmpeg_v4l2request_repo: str
-    ffmpeg_v4l2request_ref: str
-    ffmpeg_v4l2request_commit: str
+    ffmpeg_patchset: PatchSet
+    ffmpeg_min_kernel_headers: str
     ffmpeg_package: str
 
     mpv_repo: str
     mpv_ref: str
+    mpv_patchset: PatchSet
     mpv_package: str
     libplacebo_package: str
 
@@ -216,30 +242,53 @@ def load_config(path: Path, args: argparse.Namespace) -> Config:
         warn("Neither deb generation nor direct installation is enabled; enabling direct installation.")
         install_direct = True
 
+    # No sudo needed (and often not usable) when already running as root, e.g. in a container.
+    sudo = [] if os.geteuid() == 0 else split_words(args.sudo or get("build", "sudo", "sudo"))
+
+    # Local patch paths in the config are relative to the config file.
+    config_dir = path.resolve().parent
+
+    def resolve_local(entry: str) -> str:
+        if "://" in entry:
+            return entry
+        return str((config_dir / entry).expanduser())
+
+    def get_patchset(section: str, apply_override: bool | None, commit_override: str | None) -> PatchSet:
+        patches = split_words(get(section, "patches", ""))
+        extra_patches = [resolve_local(x) for x in split_words(get(section, "extra_patches", ""))]
+        has_patches = bool(patches or extra_patches)
+        return PatchSet(
+            section=section,
+            enabled=apply_override if apply_override is not None else get_bool(section, "apply_patch", has_patches),
+            base_url=get(section, "patch_base_url", ""),
+            commit=commit_override or get(section, "patch_commit", ""),
+            patches=patches,
+            extra_patches=extra_patches,
+        )
+
     return Config(
         build_root=build_root,
         package_output=package_output,
         install_prefix=install_prefix,
         deb_iteration=args.deb_iteration or get("packages", "deb_iteration", "1"),
         deb_maintainer=args.deb_maintainer or get("packages", "deb_maintainer", "local <root@localhost>"),
-        sudo=args.sudo or get("build", "sudo", "sudo"),
+        sudo=sudo,
         jobs=jobs,
 
         ffmpeg_repo=get("ffmpeg", "repo"),
-        ffmpeg_ref=args.ffmpeg_ref or get("ffmpeg", "ref", "master"),
-        ffmpeg_apply_patch=args.ffmpeg_apply_patch if args.ffmpeg_apply_patch is not None else get_bool("ffmpeg", "apply_patch", True),
-        ffmpeg_v4l2request_repo=args.ffmpeg_v4l2request_repo or get("ffmpeg", "v4l2request_repo", "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"),
-        ffmpeg_v4l2request_ref=args.ffmpeg_v4l2request_ref or get("ffmpeg", "v4l2request_ref", "v4l2-request-n9.0"),
-        ffmpeg_v4l2request_commit=args.ffmpeg_v4l2request_commit or get("ffmpeg", "v4l2request_commit", ""),
+        ffmpeg_ref=args.ffmpeg_ref or get("ffmpeg", "ref", "n9.0.2"),
+        ffmpeg_patchset=get_patchset("ffmpeg", args.ffmpeg_apply_patch, args.ffmpeg_patch_commit),
+        ffmpeg_min_kernel_headers=get("ffmpeg", "min_kernel_headers", ""),
         ffmpeg_package=get("ffmpeg", "package_name", "ffmpeg-v4l2request-rockchip"),
 
         mpv_repo=get("mpv", "repo"),
         mpv_ref=args.mpv_ref or get("mpv", "ref", "v0.41.0"),
+        mpv_patchset=get_patchset("mpv", args.mpv_apply_patch, None),
         mpv_package=get("mpv", "package_name", "mpv-v4l2request-rockchip"),
         libplacebo_package=get("mpv", "libplacebo_package", "libplacebo-rockchip"),
 
         kodi_repo=get("kodi", "repo"),
-        kodi_ref=args.kodi_ref or get("kodi", "ref", "v22.0b2-Piers"),
+        kodi_ref=args.kodi_ref or get("kodi", "ref", "22.0rc1-Piers"),
         kodi_package=get("kodi", "package_name", "kodi-v4l2request-rockchip"),
 
         joystick_package=get("kodi", "joystick_package_name", "kodi-v4l2request-peripheral-joystick-rockchip"),
@@ -276,18 +325,18 @@ def apt_install(config: Config, packages: Iterable[str], *, optional: bool = Fal
         if not pkgs:
             return
 
-    run([config.sudo, "apt-get", "install", "-y", *pkgs])
+    run([*config.sudo, "apt-get", "install", "-y", *pkgs])
 
 
 def install_deps(config: Config) -> None:
     log("Installing build dependencies")
-    run([config.sudo, "apt-get", "update"])
+    run([*config.sudo, "apt-get", "update"])
 
     required = [
         "build-essential", "patch", "git", "curl", "ca-certificates", "pkg-config",
         "cmake", "ninja-build", "meson", "autoconf", "automake", "libtool",
         "gettext", "gawk", "gperf", "zip", "unzip", "python3", "python3-dev",
-        "python3-pip", "swig", "default-jre", "ccache", "yasm", "nasm",
+        "python3-pip", "swig", "bison", "default-jre", "ccache", "yasm", "nasm",
         "linux-libc-dev", "libdrm-dev", "libudev-dev", "libgbm-dev",
         "libegl1-mesa-dev", "libgles2-mesa-dev", "libgl1-mesa-dev",
         "libxkbcommon-dev", "libplacebo-dev", "libepoxy-dev", "liblcms2-dev", "libzimg-dev",
@@ -303,6 +352,7 @@ def install_deps(config: Config) -> None:
         "libflatbuffers-dev", "libinput-dev", "libevdev-dev", "libcec-dev",
         "libcdio-dev", "libcurl4-openssl-dev", "libdbus-1-dev", "liblirc-dev",
         "libshairplay-dev", "libdisplay-info-dev", "rsync",
+        "libwayland-dev", "libwayland-bin", "wayland-protocols",
     ]
     apt_install(config, required)
 
@@ -316,10 +366,18 @@ def install_deps(config: Config) -> None:
 
     if config.build_debs and not shutil.which("fpm"):
         log("Installing fpm for local .deb generation")
-        run([config.sudo, "gem", "install", "--no-document", "fpm"])
+        run([*config.sudo, "gem", "install", "--no-document", "fpm"])
 
     if not pkg_config_exists("libdisplay-info"):
         warn("libdisplay-info was not found by pkg-config. Kodi GBM builds may fail on newer Kodi.")
+
+    if config.ffmpeg_min_kernel_headers and not kernel_headers_at_least(config.ffmpeg_min_kernel_headers):
+        warn(
+            f"Linux UAPI headers are older than {config.ffmpeg_min_kernel_headers}. On Debian 13 install them with:\n"
+            "  echo 'deb http://deb.debian.org/debian trixie-backports main' | "
+            "sudo tee /etc/apt/sources.list.d/trixie-backports.list\n"
+            "  sudo apt-get update && sudo apt-get install -t trixie-backports linux-libc-dev"
+        )
 
 
 def pkg_config_exists(name: str, env: dict[str, str] | None = None) -> bool:
@@ -330,11 +388,14 @@ def git_checkout(repo: str, directory: Path, ref: str) -> None:
     directory.parent.mkdir(parents=True, exist_ok=True)
     if not (directory / ".git").exists():
         log(f"Cloning {repo} into {directory}")
-        run(["git", "clone", repo, str(directory)])
+        # Blob-less partial clone: full history for git describe, file contents fetched on demand.
+        run(["git", "clone", "--filter=blob:none", repo, str(directory)])
 
-    run(["git", "fetch", "--all", "--tags", "--prune"], cwd=directory)
+    run(["git", "fetch", "--all", "--tags", "--prune", "--force"], cwd=directory)
     run(["git", "checkout", ref], cwd=directory)
-    run(["git", "pull", "--ff-only"], cwd=directory, check=False)
+    on_branch = run(["git", "symbolic-ref", "-q", "HEAD"], cwd=directory, check=False).returncode == 0
+    if on_branch:
+        run(["git", "pull", "--ff-only"], cwd=directory, check=False)
 
 
 def git_describe(directory: Path) -> str:
@@ -342,13 +403,40 @@ def git_describe(directory: Path) -> str:
     return sanitize_deb_version(out.strip())
 
 
+def multiarch_triplet() -> str:
+    # Meson installs into lib/<triplet> (e.g. aarch64-linux-gnu) on Debian.
+    for cmd in (["dpkg-architecture", "-qDEB_HOST_MULTIARCH"], ["gcc", "-dumpmachine"]):
+        if shutil.which(cmd[0]):
+            result = subprocess.run(cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+    return "aarch64-linux-gnu"
+
+
 def base_env(config: Config) -> dict[str, str]:
     env = os.environ.copy()
     prefix = str(config.install_prefix)
-    env["PKG_CONFIG_PATH"] = f"{prefix}/lib/pkgconfig:{prefix}/lib/aarch64-linux-gnu/pkgconfig:{env.get('PKG_CONFIG_PATH', '')}"
-    env["LD_LIBRARY_PATH"] = f"{prefix}/lib:{prefix}/lib/aarch64-linux-gnu:{env.get('LD_LIBRARY_PATH', '')}"
+    triplet = multiarch_triplet()
+    env["PKG_CONFIG_PATH"] = f"{prefix}/lib/pkgconfig:{prefix}/lib/{triplet}/pkgconfig:{env.get('PKG_CONFIG_PATH', '')}"
+    env["LD_LIBRARY_PATH"] = f"{prefix}/lib:{prefix}/lib/{triplet}:{env.get('LD_LIBRARY_PATH', '')}"
     env["PATH"] = f"{prefix}/bin:{env.get('PATH', '')}"
     return env
+
+
+def kernel_headers_version() -> str | None:
+    version_h = Path("/usr/include/linux/version.h")
+    if not version_h.exists():
+        return None
+    match = re.search(r"#define\s+LINUX_VERSION_CODE\s+(\d+)", version_h.read_text())
+    if not match:
+        return None
+    code = int(match.group(1))
+    return f"{code >> 16}.{(code >> 8) & 0xFF}.{code & 0xFF}"
+
+
+def kernel_headers_at_least(minimum: str) -> bool:
+    found = kernel_headers_version()
+    return found is not None and version_gte(found, minimum)
 
 
 def parse_version_parts(version: str) -> list[int]:
@@ -450,7 +538,7 @@ def build_libplacebo_from_source(config: Config, minimum: str, *, stage: Path | 
     run(["ninja", "-C", "build", f"-j{config.jobs}"], cwd=src, env=env)
     if stage is None:
         run(["meson", "install", "-C", "build"], cwd=src, env=env)
-        run([config.sudo, "ldconfig"], check=False)
+        run([*config.sudo, "ldconfig"], check=False)
     else:
         env_stage = env.copy()
         env_stage["DESTDIR"] = str(stage)
@@ -475,69 +563,13 @@ def build_libplacebo(config: Config, minimum: str = "7.360.1") -> None:
     )
 
 
-def build_libpostproc_from_source(config: Config, *, stage: Path | None = None) -> str:
-    src = config.build_root / "libpostproc"
-    prefix = str(config.install_prefix)
-
-    log("Preparing external libpostproc from source")
-    git_checkout("https://github.com/michaelni/libpostproc.git", src, "master")
-    run(["git", "reset", "--hard"], cwd=src)
-    run(["git", "clean", "-xfd"], cwd=src)
-
-    env = base_env(config)
-
-    # The standalone michaelni/libpostproc repo does not ship every internal
-    # FFmpeg header it transitively needs (e.g. mathops.h via fixed_dsp.h).
-    # If the FFmpeg source tree is already present, inject it into CFLAGS so
-    # the compiler can find those missing internal headers.
-    ffmpeg_src = config.build_root / "ffmpeg"
-    if ffmpeg_src.is_dir():
-        existing_cflags = env.get("CFLAGS", "")
-        env["CFLAGS"] = f"-I{ffmpeg_src} {existing_cflags}".strip()
-
-    configure = [
-        "./configure",
-        f"--prefix={prefix}",
-        "--enable-shared",
-        "--disable-static",
-        "--disable-doc",
-        "--disable-programs",
-    ]
-
-    run(configure, cwd=src, env=env)
-    run(["make", f"-j{config.jobs}"], cwd=src, env=env)
-    if stage is None:
-        run(["make", "install"], cwd=src, env=env)
-        run([config.sudo, "ldconfig"], check=False)
-    else:
-        run(["make", "install", f"DESTDIR={stage}"], cwd=src, env=env)
-
-    return git_describe(src)
-
-
-def build_libpostproc(config: Config) -> None:
-    stage = config.build_root / "stage" / "libpostproc"
-    shutil.rmtree(stage, ignore_errors=True)
-    stage.mkdir(parents=True, exist_ok=True)
-
-    version = build_libpostproc_from_source(config, stage=stage)
-    maybe_package_or_install(
-        config,
-        package="libpostproc-rockchip",
-        version=version,
-        stage=stage,
-        description="External libpostproc plugin package for FFmpeg 8+ based Kodi builds",
-        depends=[],
-    )
-
-
 def require_fpm(config: Config) -> None:
     if shutil.which("fpm"):
         return
     log("Installing fpm")
-    run([config.sudo, "apt-get", "update"])
-    run([config.sudo, "apt-get", "install", "-y", "ruby", "ruby-dev", "rubygems", "build-essential"])
-    run([config.sudo, "gem", "install", "--no-document", "fpm"])
+    run([*config.sudo, "apt-get", "update"])
+    run([*config.sudo, "apt-get", "install", "-y", "ruby", "ruby-dev", "rubygems", "build-essential"])
+    run([*config.sudo, "gem", "install", "--no-document", "fpm"])
 
 
 def dpkg_arch() -> str:
@@ -558,6 +590,7 @@ def create_deb(
 
     cmd = [
         "fpm",
+        "--force",  # replace a package left by an earlier run of the same version
         "-s", "dir",
         "-t", "deb",
         "-n", package,
@@ -587,17 +620,17 @@ def create_deb(
 
 def install_deb(config: Config, deb: Path) -> None:
     log(f"Installing .deb package {deb}")
-    result = run([config.sudo, "dpkg", "-i", str(deb)], check=False)
+    result = run([*config.sudo, "dpkg", "-i", str(deb)], check=False)
     if result.returncode != 0:
         warn("dpkg reported dependency issues; running apt-get -f install")
-        run([config.sudo, "apt-get", "-f", "install", "-y"])
-        run([config.sudo, "dpkg", "-i", str(deb)])
+        run([*config.sudo, "apt-get", "-f", "install", "-y"])
+        run([*config.sudo, "dpkg", "-i", str(deb)])
 
 
 def install_stage_direct(config: Config, stage: Path) -> None:
     log(f"Directly installing staged tree from {stage}")
-    run([config.sudo, "rsync", "-a", f"{stage}/", "/"])
-    run([config.sudo, "ldconfig"])
+    run([*config.sudo, "rsync", "-a", f"{stage}/", "/"])
+    run([*config.sudo, "ldconfig"])
 
 
 def maybe_package_or_install(
@@ -624,7 +657,70 @@ def maybe_package_or_install(
     if config.install_direct:
         install_stage_direct(config, stage)
 
-    run([config.sudo, "ldconfig"], check=False)
+    run([*config.sudo, "ldconfig"], check=False)
+
+
+def git_reset_tree(src: Path) -> None:
+    """Discard local changes (e.g. patches applied by an earlier run)."""
+    if (src / ".git").exists():
+        run(["git", "reset", "--hard"], cwd=src)
+        run(["git", "clean", "-xfd"], cwd=src)
+
+
+def fetch_patch(dest_dir: Path, name: str, location: str) -> Path:
+    if "://" not in location:
+        local = Path(location)
+        if not local.is_file():
+            die(f"Patch file not found: {local}")
+        return local
+
+    dest = dest_dir / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run(["curl", "-fsSL", "--retry", "3", "-o", str(dest), location])
+    return dest
+
+
+def apply_patches(config: Config, patchset: PatchSet, src: Path, ref: str) -> None:
+    section = patchset.section
+    sources = patchset.sources()
+    if not sources:
+        die(f"{section}.apply_patch is enabled but no patches are configured ({section}.patches / {section}.extra_patches).")
+
+    if patchset.commit and not re.fullmatch(r"[0-9a-f]{40}", patchset.commit):
+        warn(
+            f"{section}.patch_commit = {patchset.commit} is not a full commit SHA; "
+            "builds are not reproducible if that ref moves."
+        )
+
+    ensure_cmd("patch")
+    patch_dir = config.build_root / "patches" / section
+    shutil.rmtree(patch_dir, ignore_errors=True)
+    for name, location in sources:
+        patch_file = fetch_patch(patch_dir, name, location)
+        log(f"Applying {section} patch {name}")
+        # LibreELEC applies its patches with GNU patch, which tolerates the small context drift of
+        # point releases (offset/fuzz); git apply does not. No --dry-run: a series may create
+        # files and patch them again later. The tree is reset on the next run anyway.
+        result = run(
+            ["patch", "-p1", "--forward", "--batch", "--no-backup-if-mismatch", "-i", str(patch_file)],
+            cwd=src,
+            check=False,
+        )
+        rejects = sorted(str(p.relative_to(src)) for p in src.rglob("*.rej"))
+        if result.returncode != 0 or rejects:
+            die(
+                f"{section} patch {name} does not apply to {ref}"
+                + (f" (rejects: {', '.join(rejects)})" if rejects else "")
+                + f". Use the {section} ref the patches were made for, or update the {section} patch list."
+            )
+
+
+def enabled_ffmpeg_components(src: Path, suffix: str) -> list[str]:
+    header = src / "config_components.h"
+    if not header.exists():
+        return []
+    pattern = re.compile(rf"^#define CONFIG_(\w+)_{suffix} 1$", re.MULTILINE)
+    return sorted(m.lower() for m in pattern.findall(header.read_text()))
 
 
 def build_ffmpeg(config: Config) -> None:
@@ -633,129 +729,41 @@ def build_ffmpeg(config: Config) -> None:
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True, exist_ok=True)
 
+    git_reset_tree(src)
     git_checkout(config.ffmpeg_repo, src, config.ffmpeg_ref)
-    run(["git", "reset", "--hard"], cwd=src)
-    run(["git", "clean", "-xfd"], cwd=src)
-
-    if config.ffmpeg_apply_patch:
-        if not config.ffmpeg_v4l2request_repo:
-            die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_repo is empty.")
-
-        remote_name = "v4l2request"
-        has_remote = run(["git", "remote", "get-url", remote_name], cwd=src, check=False).returncode == 0
-        if has_remote:
-            current_remote = capture(["git", "remote", "get-url", remote_name], cwd=src).strip()
-            if current_remote != config.ffmpeg_v4l2request_repo:
-                run(["git", "remote", "set-url", remote_name, config.ffmpeg_v4l2request_repo], cwd=src)
-        else:
-            run(["git", "remote", "add", remote_name, config.ffmpeg_v4l2request_repo], cwd=src)
-
-        v4l2_ref_tip = ""
-        if config.ffmpeg_v4l2request_ref:
-            if not config.ffmpeg_v4l2request_commit:
-                warn(
-                    "ffmpeg.v4l2request_commit is not set; builds may become non-reproducible if "
-                    "ffmpeg.v4l2request_ref moves."
-                )
-            log(f"Fetching V4L2 Request branch {config.ffmpeg_v4l2request_ref}")
-            run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_ref], cwd=src)
-            v4l2_ref_tip = capture(["git", "rev-parse", "FETCH_HEAD"], cwd=src).strip()
-
-        if config.ffmpeg_v4l2request_commit:
-            pinned = f"{config.ffmpeg_v4l2request_commit}^{{commit}}"
-            has_pinned = run(["git", "cat-file", "-e", pinned], cwd=src, check=False).returncode == 0
-            if not has_pinned:
-                log(f"Fetching pinned V4L2 Request commit {config.ffmpeg_v4l2request_commit}")
-                run(["git", "fetch", "--no-tags", remote_name, config.ffmpeg_v4l2request_commit], cwd=src)
-            v4l2_tip = capture(["git", "rev-parse", pinned], cwd=src).strip()
-        else:
-            if not v4l2_ref_tip:
-                die("ffmpeg.apply_patch is enabled but ffmpeg.v4l2request_ref is empty.")
-            v4l2_tip = v4l2_ref_tip
-
-        ffmpeg_checked_out_commit = capture(["git", "rev-parse", "HEAD"], cwd=src).strip()
-        head_contains_tip = run(
-            ["git", "merge-base", "--is-ancestor", v4l2_tip, ffmpeg_checked_out_commit],
-            cwd=src,
-            check=False,
-        ).returncode == 0
-        tip_contains_head = run(
-            ["git", "merge-base", "--is-ancestor", ffmpeg_checked_out_commit, v4l2_tip],
-            cwd=src,
-            check=False,
-        ).returncode == 0
-
-        if head_contains_tip:
-            log("V4L2 Request commits are already present on the selected FFmpeg ref.")
-        elif not tip_contains_head:
-            die(
-                f"V4L2 Request tip {v4l2_tip} is not compatible with FFmpeg ref {config.ffmpeg_ref}. "
-                "Refuse to cherry-pick because this would pull unrelated upstream FFmpeg commits. "
-                "Use a matching v4l2request_ref/v4l2request_commit."
-            )
-        else:
-            commits = [
-                x.strip() for x in capture(
-                    ["git", "rev-list", "--reverse", f"{ffmpeg_checked_out_commit}..{v4l2_tip}"],
-                    cwd=src,
-                ).splitlines()
-                if x.strip()
-            ]
-            if not commits:
-                log("No V4L2 Request commits to cherry-pick.")
-            else:
-                commit_count = str(len(commits))
-                log(f"Applying {commit_count} V4L2 Request commit(s) by cherry-pick")
-                result = run(["git", "cherry-pick", *commits], cwd=src, check=False)
-                if result.returncode != 0:
-                    run(["git", "cherry-pick", "--abort"], cwd=src, check=False)
-                    die(
-                        f"Failed to cherry-pick V4L2 Request commits onto {config.ffmpeg_ref}. "
-                        "Set ffmpeg.apply_patch = no if your FFmpeg repo already contains v4l2request, "
-                        "or pin ffmpeg.v4l2request_commit to a compatible commit."
-                    )
-    else:
-        log("Skipping FFmpeg V4L2 Request commit integration because ffmpeg.apply_patch = no")
-
+    git_reset_tree(src)
     version = git_describe(src)
+
+    if config.ffmpeg_patchset.enabled:
+        if config.ffmpeg_min_kernel_headers and not kernel_headers_at_least(config.ffmpeg_min_kernel_headers):
+            die(
+                f"FFmpeg patches need Linux UAPI headers >= {config.ffmpeg_min_kernel_headers} "
+                f"(found {kernel_headers_version() or 'none'} in /usr/include/linux/version.h). "
+                "On Debian 13 install linux-libc-dev from trixie-backports."
+            )
+        apply_patches(config, config.ffmpeg_patchset, src, config.ffmpeg_ref)
+    else:
+        log("Skipping FFmpeg patches because ffmpeg.apply_patch = no")
+
     prefix = str(config.install_prefix)
 
-    # Some FFmpeg forks/branches drop or rename configure flags.
-    # Probe supported options first to avoid cryptic configure failures.
+    # Autodetected options are listed as --disable-*, others as --enable-*.
     configure_help = capture(["./configure", "--help"], cwd=src, check=False)
 
-    optional_flags: list[str] = []
-    if "--enable-v4l2-request" in configure_help:
-        optional_flags.append("--enable-v4l2-request")
-    else:
-        warn("FFmpeg configure option --enable-v4l2-request is not supported by this ref; skipping it.")
+    def has_option(name: str) -> bool:
+        return re.search(rf"--(enable|disable)-{re.escape(name)}\b", configure_help) is not None
 
-    if "--enable-postproc" in configure_help:
+    if not has_option("v4l2-request"):
+        die(
+            f"FFmpeg ref {config.ffmpeg_ref} has no v4l2-request configure option. "
+            "Enable ffmpeg.apply_patch or use an FFmpeg tree that contains V4L2 Request support."
+        )
+
+    optional_flags: list[str] = []
+    if has_option("postproc"):
         optional_flags.append("--enable-postproc")
     else:
-        warn("FFmpeg configure option --enable-postproc is not supported by this ref; skipping it.")
-
-    hwaccel_flags: list[str] = []
-    if "h264_v4l2request" in configure_help:
-        hwaccel_flags.append("--enable-hwaccel=h264_v4l2request")
-    else:
-        warn("FFmpeg hwaccel h264_v4l2request not listed by configure; skipping explicit enable flag.")
-
-    if "hevc_v4l2request" in configure_help:
-        hwaccel_flags.append("--enable-hwaccel=hevc_v4l2request")
-    else:
-        warn("FFmpeg hwaccel hevc_v4l2request not listed by configure; skipping explicit enable flag.")
-
-    has_v4l2request_code = subprocess.run(
-        ["git", "grep", "-q", "v4l2_request", "libavcodec", "libavutil"],
-        cwd=src,
-        check=False,
-    ).returncode == 0
-    if not has_v4l2request_code and not hwaccel_flags:
-        die(
-            f"FFmpeg ref {config.ffmpeg_ref} does not appear to contain V4L2 Request support. "
-            "Use a v4l2request-capable FFmpeg ref or enable the external patch."
-        )
+        warn("FFmpeg has no libpostproc (add the LibreELEC postproc patch); Kodi will build without it.")
 
     configure = [
         "./configure",
@@ -764,11 +772,10 @@ def build_ffmpeg(config: Config) -> None:
         "--enable-shared",
         "--disable-static",
         "--enable-libdrm",
+        "--enable-libudev",
+        "--enable-v4l2-request",
         *optional_flags,
         "--enable-pthreads",
-        "--enable-decoder=h264",
-        "--enable-decoder=hevc",
-        *hwaccel_flags,
         *config.ffmpeg_configure_extra,
     ]
 
@@ -776,23 +783,18 @@ def build_ffmpeg(config: Config) -> None:
     run(["make", "distclean"], cwd=src, check=False)
     run(configure, cwd=src, env=base_env(config))
 
+    # configure silently drops hwaccels whose dependencies are missing, so check what it enabled.
+    hwaccels = [x for x in enabled_ffmpeg_components(src, "HWACCEL") if x.endswith("_v4l2request")]
+    log(f"Enabled V4L2 Request hwaccels: {', '.join(hwaccels) or 'none'}")
+    missing = [x for x in ("h264_v4l2request", "hevc_v4l2request") if x not in hwaccels]
+    if missing:
+        die(f"FFmpeg configure did not enable {', '.join(missing)}; check config.log for missing dependencies.")
+
     log("Building FFmpeg")
     run(["make", f"-j{config.jobs}"], cwd=src)
 
     log("Staging FFmpeg install")
     run(["make", "install", f"DESTDIR={stage}"], cwd=src)
-
-    # FFmpeg's `make install` omits internal headers (e.g. mathops.h) that are
-    # #included by some public headers such as libavutil/fixed_dsp.h.  Downstream
-    # consumers like Kodi fail to compile unless those internal headers are also
-    # present.  Copy every internal libavutil header that is missing from the
-    # staged include tree.
-    staged_lavu = stage / str(config.install_prefix).lstrip("/") / "include" / "libavutil"
-    if staged_lavu.is_dir():
-        for internal_hdr in (src / "libavutil").glob("*.h"):
-            dest = staged_lavu / internal_hdr.name
-            if not dest.exists():
-                shutil.copy2(internal_hdr, dest)
 
     maybe_package_or_install(
         config,
@@ -800,14 +802,20 @@ def build_ffmpeg(config: Config) -> None:
         version=version,
         stage=stage,
         description="FFmpeg with V4L2 Request support for Rockchip/RK3588",
-        depends=["libdrm2", "zlib1g"],
+        depends=["libdrm2", "libudev1", "zlib1g"],
     )
 
     log("Verifying FFmpeg")
     ffmpeg = config.install_prefix / "bin" / "ffmpeg"
     if ffmpeg.exists():
-        run([str(ffmpeg), "-hide_banner", "-hwaccels"], env=base_env(config), check=False)
-        run([str(ffmpeg), "-hide_banner", "-decoders"], env=base_env(config), check=False)
+        out = capture([str(ffmpeg), "-hide_banner", "-hwaccels"], env=base_env(config))
+        print(out)
+        if "v4l2request" not in out.split():
+            die("Installed ffmpeg does not list the v4l2request hwaccel.")
+        out = capture([str(ffmpeg), "-hide_banner", "-decoders"], env=base_env(config))
+        for codec in ("h264", "hevc", "vp9", "av1"):
+            if not re.search(rf"^\s*V\S*\s+{codec}\s", out, re.MULTILINE):
+                die(f"Installed ffmpeg does not list the {codec} decoder.")
 
 
 def build_mpv(config: Config) -> None:
@@ -818,8 +826,15 @@ def build_mpv(config: Config) -> None:
 
     ensure_libplacebo(config, minimum="7.360.1")
 
+    git_reset_tree(src)
     git_checkout(config.mpv_repo, src, config.mpv_ref)
+    git_reset_tree(src)
     version = git_describe(src)
+
+    if config.mpv_patchset.enabled:
+        apply_patches(config, config.mpv_patchset, src, config.mpv_ref)
+    else:
+        log("Skipping mpv patches because mpv.apply_patch = no")
 
     build_dir = src / "build"
     shutil.rmtree(build_dir, ignore_errors=True)
@@ -827,39 +842,31 @@ def build_mpv(config: Config) -> None:
     prefix = str(config.install_prefix)
     env = base_env(config)
 
+    # FFmpeg's V4L2 Request hwaccels use their own hwdevice type. Upstream mpv only has
+    # DRM PRIME interops, so --hwdec=v4l2request comes from the patch (mpv PR #14690),
+    # which adds the 'v4l2request' Meson option.
     option_files = [src / "meson.options", src / "meson_options.txt"]
-    option_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in option_files if p.exists())
-    has_v4l2request_opt = "option('v4l2request'" in option_text or 'option("v4l2request"' in option_text
-    has_egl_drm_opt = "option('egl-drm'" in option_text or 'option("egl-drm"' in option_text
+    meson_options = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in option_files if p.exists())
+    has_v4l2request = re.search(r"option\(\s*'v4l2request'", meson_options) is not None
+    if not has_v4l2request:
+        warn("mpv has no v4l2request option; only the slow --hwdec=v4l2request-copy path will work.")
 
     meson_cmd = [
         "meson", "setup", "build",
         f"--prefix={prefix}",
         "-Ddrm=enabled",
         "-Dgbm=enabled",
+        "-Degl=enabled",
+        "-Degl-drm=enabled",
         "-Dgl=enabled",
         "-Dwayland=enabled",
         "-Dx11=disabled",
-        *(["-Dv4l2request=enabled"] if has_v4l2request_opt else []),
-        *(["-Degl-drm=enabled"] if has_egl_drm_opt else []),
+        *(["-Dv4l2request=enabled"] if has_v4l2request else []),
         *config.mpv_meson_extra,
     ]
 
     log(f"Configuring mpv {version}")
-    result = run(meson_cmd, cwd=src, env=env, check=False)
-    if result.returncode != 0:
-        warn("mpv configure failed with full option set; retrying with reduced option set.")
-        shutil.rmtree(build_dir, ignore_errors=True)
-        reduced = [
-            "meson", "setup", "build",
-            f"--prefix={prefix}",
-            "-Ddrm=enabled",
-            "-Dgbm=enabled",
-            "-Dgl=enabled",
-            *(["-Dv4l2request=enabled"] if has_v4l2request_opt else []),
-            *config.mpv_meson_extra,
-        ]
-        run(reduced, cwd=src, env=env)
+    run(meson_cmd, cwd=src, env=env)
 
     log("Building mpv")
     run(["ninja", "-C", "build", f"-j{config.jobs}"], cwd=src, env=env)
@@ -881,19 +888,17 @@ def build_mpv(config: Config) -> None:
     log("Verifying mpv")
     mpv = config.install_prefix / "bin" / "mpv"
     if mpv.exists():
-        out = capture([str(mpv), "--hwdec=help"], env=env, check=False)
+        out = capture([str(mpv), "--hwdec=help"], env=env)
         print(out)
-        has_drm_hwdec = False
-        for raw_line in out.splitlines():
-            line = re.sub(r"^[\s\-\*\u2022]+", "", raw_line.lower()).strip()
-            if not line or line.endswith(":"):
-                continue
-            entry = line.split()[0].rstrip(",:")
-            if entry in {"drm", "drm-copy"}:
-                has_drm_hwdec = True
-                break
-        if not has_drm_hwdec:
-            warn("mpv was built, but --hwdec=help did not list drm/drm-copy hwdec entries (this check does not validate full DRM PRIME interop).")
+        # Lines look like "  v4l2request (h264-v4l2request)".
+        hwdecs = {line.split()[0] for line in out.splitlines() if line.startswith("  ") and line.strip()}
+        if "v4l2request" not in hwdecs:
+            die("mpv was built, but --hwdec=help does not list the v4l2request hwdec.")
+        if has_v4l2request:
+            out = capture([str(mpv), "--gpu-hwdec-interop=help"], env=env)
+            print(out)
+            if "v4l2request-overlay" not in out.split():
+                die("mpv was built, but --gpu-hwdec-interop=help does not list v4l2request-overlay.")
 
 
 def build_kodi(config: Config) -> None:
@@ -906,31 +911,20 @@ def build_kodi(config: Config) -> None:
     build.mkdir(parents=True, exist_ok=True)
     stage.mkdir(parents=True, exist_ok=True)
 
-    ensure_libplacebo(config, minimum="7.360.1")
-
     git_checkout(config.kodi_repo, src, config.kodi_ref)
     version = git_describe(src)
-
-    build_gtest_from_source(config)
 
     prefix = str(config.install_prefix)
     env = base_env(config)
 
+    if not pkg_config_exists("libavcodec", env=env):
+        die(f"FFmpeg is not installed under {prefix}. Build/install the ffmpeg target first.")
+
+    # libpostproc is provided by the FFmpeg package (LibreELEC postproc patch).
     kodi_ffmpeg_extra: list[str] = []
     if not pkg_config_exists("libpostproc", env=env):
-        warn("libpostproc not found. Attempting build from michaelni/libpostproc.")
-        try:
-            build_libpostproc_from_source(config)
-        except (BuildError, subprocess.CalledProcessError):
-            warn("Failed to build external libpostproc from source.")
-
-        env = base_env(config)
-        if not pkg_config_exists("libpostproc", env=env):
-            warn(
-                "libpostproc is still unavailable; "
-                "configuring Kodi with -DDISABLE_FFMPEG_SOURCE_PLUGINS=ON."
-            )
-            kodi_ffmpeg_extra.append("-DDISABLE_FFMPEG_SOURCE_PLUGINS=ON")
+        warn("libpostproc not found; configuring Kodi with -DDISABLE_FFMPEG_SOURCE_PLUGINS=ON.")
+        kodi_ffmpeg_extra.append("-DDISABLE_FFMPEG_SOURCE_PLUGINS=ON")
 
     cmake_cmd = [
         "cmake", str(src),
@@ -941,7 +935,8 @@ def build_kodi(config: Config) -> None:
         "-DAPP_RENDER_SYSTEM=gles",
         "-DENABLE_INTERNAL_FFMPEG=OFF",
         f"-DFFMPEG_PATH={prefix}",
-        "-DENABLE_INTERNAL_FLATBUFFERS=ON",
+        # Kodi 22 needs SWIG >= 4.5 (Debian 13 has 4.3); this builds Kodi's pinned upstream SWIG.
+        "-DENABLE_INTERNAL_SWIG=ON",
         "-DENABLE_ALSA=ON",
         "-DENABLE_PULSEAUDIO=OFF",
         "-DENABLE_PIPEWIRE=OFF",
@@ -949,21 +944,13 @@ def build_kodi(config: Config) -> None:
         "-DENABLE_WAYLAND=OFF",
         "-DENABLE_VAAPI=OFF",
         "-DENABLE_VDPAU=OFF",
+        "-DENABLE_TESTING=OFF",
         *kodi_ffmpeg_extra,
         *config.kodi_cmake_extra,
     ]
 
     log(f"Configuring Kodi {version}")
-    result = run(cmake_cmd, cwd=build, env=env, check=False)
-    if result.returncode != 0:
-        warn("Kodi configure failed; retrying with internal Exiv2 enabled.")
-        shutil.rmtree(build, ignore_errors=True)
-        build.mkdir(parents=True, exist_ok=True)
-        cmake_cmd_internal = [
-            *cmake_cmd,
-            "-DENABLE_INTERNAL_EXIV2=ON",
-        ]
-        run(cmake_cmd_internal, cwd=build, env=env)
+    run(cmake_cmd, cwd=build, env=env)
 
     log("Building Kodi")
     run(["cmake", "--build", ".", "--", f"-j{config.jobs}"], cwd=build, env=env)
@@ -983,47 +970,19 @@ def build_kodi(config: Config) -> None:
     )
 
     log("Verifying Kodi FFmpeg linkage")
-    kodi_bin_candidates = [
-        config.install_prefix / "lib" / "kodi" / "kodi.bin",
-        config.install_prefix / "bin" / "kodi",
-    ]
-    for candidate in kodi_bin_candidates:
-        if candidate.exists():
-            out = capture(["ldd", str(candidate)], check=False)
-            for line in out.splitlines():
-                if any(x in line for x in ["libavcodec", "libavformat", "libavutil", "libswscale", "libswresample"]):
-                    print(line)
-
-
-def build_gtest_from_source(config: Config) -> None:
-    src = config.build_root / "googletest"
-    build = config.build_root / "googletest-build"
-    prefix = str(config.install_prefix)
-
-    log("Preparing GoogleTest from source")
-    git_checkout("https://github.com/google/googletest.git", src, "v1.14.0")
-
-    shutil.rmtree(build, ignore_errors=True)
-    build.mkdir(parents=True, exist_ok=True)
-
-    env = base_env(config)
-    cmake_cmd = [
-        "cmake", str(src),
-        f"-DCMAKE_INSTALL_PREFIX={prefix}",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DBUILD_GMOCK=OFF",
-        "-Dgtest_build_tests=OFF",
-        "-DINSTALL_GTEST=ON",
-    ]
-
-    log("Configuring GoogleTest")
-    run(cmake_cmd, cwd=build, env=env)
-
-    log("Building GoogleTest")
-    run(["cmake", "--build", ".", "--", f"-j{config.jobs}"], cwd=build, env=env)
-
-    log("Installing GoogleTest")
-    run(["cmake", "--install", "."], cwd=build, env=env)
+    # bin/kodi is a wrapper script; the GBM binary is lib/kodi/kodi-gbm.
+    kodi_bin = config.install_prefix / "lib" / "kodi" / "kodi-gbm"
+    if (config.build_debs and config.install_debs) or config.install_direct:
+        if not kodi_bin.exists():
+            die(f"Kodi binary not found at {kodi_bin}.")
+        out = capture(["ldd", str(kodi_bin)], env=env)
+        libs = [line.strip() for line in out.splitlines() if re.search(r"lib(av|sw|postproc)", line)]
+        print("\n".join(libs))
+        if "not found" in out:
+            die(f"{kodi_bin} has unresolved libraries:\n{out}")
+        avcodec = next((line for line in libs if line.startswith("libavcodec")), "")
+        if str(config.install_prefix) not in avcodec:
+            die(f"Kodi does not link the libavcodec from {config.install_prefix}: {avcodec or 'not linked'}")
 
 
 def build_joystick(config: Config) -> None:
@@ -1048,10 +1007,15 @@ def build_joystick(config: Config) -> None:
 
     env = base_env(config)
 
+    # Kodi's add-on build installs each add-on during the build step into
+    # CMAKE_INSTALL_PREFIX, so point that at the staging tree. OVERRIDE_PATHS keeps
+    # it from switching to Kodi's build-local depends directory instead.
+    stage_prefix = stage / str(config.install_prefix).lstrip("/")
     cmake_cmd = [
         "cmake", str(kodi_src / "cmake" / "addons"),
         "-DCMAKE_BUILD_TYPE=Release",
-        f"-DCMAKE_INSTALL_PREFIX={config.install_prefix}",
+        f"-DCMAKE_INSTALL_PREFIX={stage_prefix}",
+        "-DOVERRIDE_PATHS=ON",
         "-DPACKAGE_ZIP=OFF",
         "-DADDONS_TO_BUILD=peripheral.joystick",
         "-DCORE_SYSTEM_NAME=linux",
@@ -1064,15 +1028,16 @@ def build_joystick(config: Config) -> None:
     log("Configuring Kodi peripheral.joystick add-on")
     run(cmake_cmd, cwd=addon_build, env=env)
 
-    log("Building Kodi peripheral.joystick add-on")
+    log("Building and staging Kodi peripheral.joystick add-on")
     run(["cmake", "--build", ".", "--", f"-j{config.jobs}"], cwd=addon_build, env=env)
 
-    log("Staging Kodi peripheral.joystick add-on")
-    env_stage = env.copy()
-    env_stage["DESTDIR"] = str(stage)
-    run(["cmake", "--install", "."], cwd=addon_build, env=env_stage)
+    addon_xml = stage_prefix / "share" / "kodi" / "addons" / "peripheral.joystick" / "addon.xml"
+    addon_libs = list((stage_prefix / "lib" / "kodi" / "addons" / "peripheral.joystick").glob("peripheral.joystick.so*"))
+    if not addon_xml.exists() or not addon_libs:
+        die(f"peripheral.joystick was not staged under {stage_prefix}.")
 
-    version = "1." + capture(["date", "+%Y%m%d%H%M"]).strip()
+    match = re.search(r'<addon[^>]*\sversion="([^"]+)"', addon_xml.read_text(encoding="utf-8"))
+    version = match.group(1) if match else "1." + capture(["date", "+%Y%m%d%H%M"]).strip()
 
     maybe_package_or_install(
         config,
@@ -1097,7 +1062,7 @@ Package output:
 
 Useful checks:
   {config.install_prefix}/bin/ffmpeg -hide_banner -hwaccels
-  {config.install_prefix}/bin/mpv --hwdec=help | grep -i drm
+  {config.install_prefix}/bin/mpv --hwdec=help | grep -i v4l2request
   ldd {config.install_prefix}/lib/kodi/kodi.bin | grep -E 'avcodec|avformat|avutil'
   {config.install_prefix}/bin/kodi --standalone
 
@@ -1108,8 +1073,8 @@ mpv GBM/KMS test:
     --vo=gpu-next \\
     --drm-connector=HDMI-A-2 \\
     --drm-mode=1 \\
-    --hwdec=drm \\
-    --gpu-hwdec-interop=drmprime-overlay \\
+    --hwdec=v4l2request \\
+    --gpu-hwdec-interop=v4l2request-overlay \\
     --hwdec-software-fallback=no \\
     /path/to/video.mkv
 """)
@@ -1125,7 +1090,7 @@ def parse_args() -> argparse.Namespace:
         "targets",
         nargs="*",
         default=["all"],
-        choices=["deps", "ffmpeg", "libplacebo", "libpostproc", "mpv", "kodi", "joystick", "all"],
+        choices=["deps", "ffmpeg", "libplacebo", "mpv", "kodi", "joystick", "all"],
         help="Build targets to run.",
     )
 
@@ -1151,15 +1116,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--deb-maintainer", help="Debian package maintainer string.")
 
     ap.add_argument("--ffmpeg-ref", help="Override FFmpeg git ref.")
-    ap.add_argument("--ffmpeg-v4l2request-repo", help="Override FFmpeg V4L2 Request remote repository.")
-    ap.add_argument("--ffmpeg-v4l2request-ref", help="Override FFmpeg V4L2 Request git ref.")
-    ap.add_argument("--ffmpeg-v4l2request-commit", help="Override FFmpeg V4L2 Request pinned commit.")
+    ap.add_argument("--ffmpeg-patch-commit", help="Override the commit/ref that FFmpeg patch files are taken from.")
 
     ffmpeg_patch_group = ap.add_mutually_exclusive_group()
-    ffmpeg_patch_group.add_argument("--ffmpeg-apply-patch", dest="ffmpeg_apply_patch", action="store_true", help="Apply external FFmpeg V4L2 Request commit series.")
-    ffmpeg_patch_group.add_argument("--ffmpeg-no-patch", dest="ffmpeg_apply_patch", action="store_false", help="Do not apply external FFmpeg V4L2 Request commit series.")
+    ffmpeg_patch_group.add_argument("--ffmpeg-apply-patch", dest="ffmpeg_apply_patch", action="store_true", help="Apply the configured FFmpeg patch files.")
+    ffmpeg_patch_group.add_argument("--ffmpeg-no-patch", dest="ffmpeg_apply_patch", action="store_false", help="Do not apply FFmpeg patch files.")
     ap.set_defaults(ffmpeg_apply_patch=None)
     ap.add_argument("--mpv-ref", help="Override mpv git ref.")
+
+    mpv_patch_group = ap.add_mutually_exclusive_group()
+    mpv_patch_group.add_argument("--mpv-apply-patch", dest="mpv_apply_patch", action="store_true", help="Apply the configured mpv patch files.")
+    mpv_patch_group.add_argument("--mpv-no-patch", dest="mpv_apply_patch", action="store_false", help="Do not apply mpv patch files.")
+    ap.set_defaults(mpv_apply_patch=None)
     ap.add_argument("--kodi-ref", help="Override Kodi git ref.")
 
     joy_group = ap.add_mutually_exclusive_group()
@@ -1176,6 +1144,12 @@ def main() -> int:
     try:
         config = load_config(Path(args.config).expanduser(), args)
 
+        if not config.sudo:
+            # sudo would use its secure_path; without it, dpkg still needs ldconfig etc. from sbin.
+            path = os.environ.get("PATH", "").split(os.pathsep)
+            missing = [d for d in ("/usr/local/sbin", "/usr/sbin", "/sbin") if d not in path]
+            os.environ["PATH"] = os.pathsep.join([*path, *missing])
+
         for cmd in ["git", "cmake", "make", "pkg-config"]:
             ensure_cmd(cmd)
 
@@ -1184,7 +1158,7 @@ def main() -> int:
 
         targets = args.targets
         if "all" in targets:
-            targets = ["deps", "ffmpeg", "libplacebo", "libpostproc", "mpv", "kodi", "joystick"]
+            targets = ["deps", "ffmpeg", "libplacebo", "mpv", "kodi", "joystick"]
 
         for target in targets:
             if target == "deps":
@@ -1193,8 +1167,6 @@ def main() -> int:
                 build_ffmpeg(config)
             elif target == "libplacebo":
                 build_libplacebo(config)
-            elif target == "libpostproc":
-                build_libpostproc(config)
             elif target == "mpv":
                 build_mpv(config)
             elif target == "kodi":

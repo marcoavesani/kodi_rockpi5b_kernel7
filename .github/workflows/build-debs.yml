@@ -7,6 +7,10 @@ on:
         description: "FFmpeg ref, tag, branch or commit"
         required: false
         default: ""
+      ffmpeg_patch_commit:
+        description: "LibreELEC.tv commit/branch for the FFmpeg patch files (default: pinned in config)"
+        required: false
+        default: ""
       mpv_ref:
         description: "mpv ref, tag, branch or commit"
         required: false
@@ -71,6 +75,7 @@ jobs:
       - name: Build FFmpeg deb package
         env:
           FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref }}
+          FFMPEG_PATCH_COMMIT: ${{ github.event.inputs.ffmpeg_patch_commit }}
         run: |
           # Intentionally no /build cache mount: source trees are cloned fresh every run.
           extra_args=()
@@ -79,6 +84,10 @@ jobs:
             extra_args+=(--ffmpeg-ref "${FFMPEG_REF}")
           else
             echo "Using FFmpeg ref from config file"
+          fi
+          if [[ -n "${FFMPEG_PATCH_COMMIT:-}" ]]; then
+            echo "Using FFmpeg patch commit override: ${FFMPEG_PATCH_COMMIT}"
+            extra_args+=(--ffmpeg-patch-commit "${FFMPEG_PATCH_COMMIT}")
           fi
 
           docker run --rm \
@@ -91,19 +100,6 @@ jobs:
             "${extra_args[@]}" \
             ffmpeg
 
-      - name: Build libpostproc deb package (optional)
-        continue-on-error: true
-        run: |
-          # Keep libpostproc in the same job as FFmpeg so both share /build sources.
-          docker run --rm \
-            --platform linux/arm64 \
-            -v "${{ github.workspace }}:/work" \
-            -v "${{ github.workspace }}/artifacts:/output" \
-            -v "${HOME}/.cache/rk3588-ccache:/ccache" \
-            rk3588-media-builder:arm64 \
-            --config /work/rk3588-media-stack.ci.ini \
-            libpostproc
-
       - name: List packages
         run: |
           ls -lh artifacts
@@ -115,14 +111,6 @@ jobs:
           name: rk3588-media-stack-ffmpeg-debs-arm64
           path: artifacts/ffmpeg-v4l2request-rockchip_*.deb
           if-no-files-found: error
-
-      - name: Upload libpostproc deb packages
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rk3588-media-stack-libpostproc-debs-arm64
-          path: artifacts/libpostproc-rockchip_*.deb
-          if-no-files-found: warn
 
   build-libplacebo:
     name: Build libplacebo deb (ARM64)
@@ -294,7 +282,6 @@ jobs:
     timeout-minutes: 960
     needs:
       - build-ffmpeg
-      - build-libplacebo
     permissions:
       contents: read
       actions: read
@@ -318,19 +305,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rk3588-media-stack-ffmpeg-debs-arm64
-          path: input-debs
-
-      - name: Download libplacebo artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: rk3588-media-stack-libplacebo-debs-arm64
-          path: input-debs
-
-      - name: Download libpostproc artifact
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: rk3588-media-stack-libpostproc-debs-arm64
           path: input-debs
 
       - name: Prepare output/cache directories
@@ -370,13 +344,11 @@ jobs:
             -lc 'set -euo pipefail
                  shopt -s nullglob
                  ffmpeg_debs=(/input/ffmpeg-v4l2request-rockchip_*.deb)
-                 libplacebo_debs=(/input/libplacebo-rockchip_*.deb)
-                 optional_debs=(/input/libpostproc-rockchip_*.deb)
-                 if (( ${#ffmpeg_debs[@]} == 0 || ${#libplacebo_debs[@]} == 0 )); then
-                   echo "Missing required ffmpeg/libplacebo artifacts in /input" >&2
+                 if (( ${#ffmpeg_debs[@]} == 0 )); then
+                   echo "Missing required ffmpeg artifact in /input" >&2
                    exit 1
                  fi
-                 dpkg -i "${libplacebo_debs[@]}" "${optional_debs[@]}" "${ffmpeg_debs[@]}" || apt-get -f install -y
+                 dpkg -i "${ffmpeg_debs[@]}" || apt-get -f install -y
                  extra_args=()
                  if [[ -n "${KODI_REF:-}" ]]; then
                    echo "Using Kodi ref override: ${KODI_REF}"
@@ -438,6 +410,8 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    # Test runs on other branches (workflow_dispatch) only produce artifacts.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     needs:
       - bundle-debs
     permissions:
@@ -467,7 +441,7 @@ jobs:
           body: |
             Automated build of RK3588 media stack .deb packages for ARM64 (Debian Trixie).
 
-            **Included packages:** FFmpeg (v4l2request), libpostproc, libplacebo, mpv, Kodi + joystick addon
+            **Included packages:** FFmpeg 9 (V4L2 Request + libpostproc), libplacebo, mpv (V4L2 Request hwdec), Kodi + joystick addon
             **Platform:** ARM64 — Rock Pi 5B and other RK3588 boards
             **Workflow run:** ${{ github.run_number }} · commit `${{ github.sha }}`
           files: release-debs/*.deb
