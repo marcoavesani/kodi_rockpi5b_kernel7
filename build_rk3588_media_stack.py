@@ -584,10 +584,11 @@ def installed_deb_version(package: str) -> str | None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    status, _, version = result.stdout.strip().partition(" ")
-    if result.returncode != 0 or not status.startswith("ii") or not version:
+    # ${db:Status-Abbrev} is three characters wide ("ii "), so split on any whitespace.
+    fields = result.stdout.split()
+    if result.returncode != 0 or len(fields) != 2 or fields[0] != "ii":
         return None
-    return version
+    return fields[1]
 
 
 def exact_dependency(package: str) -> str:
