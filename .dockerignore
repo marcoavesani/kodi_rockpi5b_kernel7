@@ -7,3 +7,4 @@
 *.tar.gz
 *.zip
 __pycache__/
+/.local-build

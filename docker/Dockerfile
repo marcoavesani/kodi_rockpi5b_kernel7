@@ -43,6 +43,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3-dev \
     python3-pip \
     swig \
+    bison \
     default-jre \
     ccache \
     yasm \
@@ -109,8 +110,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libshairplay-dev \
     libdisplay-info-dev \
     libdav1d-dev \
+    libwayland-dev \
+    libwayland-bin \
+    wayland-protocols \
     && gem install --no-document fpm \
     && apt-get clean
+
+# The RK3588 HEVC patch (LibreELEC "detlev") needs the V4L2 HEVC ext SPS RPS
+# controls from Linux 7.0 UAPI headers; Debian 13 ships 6.12, backports has 7.x.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if grep -q '^VERSION_CODENAME=trixie$' /etc/os-release; then \
+      echo 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/trixie-backports.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends -t trixie-backports linux-libc-dev \
+      && apt-get clean; \
+    fi
 
 RUN mkdir -p /work /build /output /ccache
 
