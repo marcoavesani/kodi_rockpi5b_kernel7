@@ -576,6 +576,48 @@ def dpkg_arch() -> str:
     return capture(["dpkg", "--print-architecture"]).strip()
 
 
+def installed_deb_version(package: str) -> str | None:
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f=${db:Status-Abbrev} ${Version}", package],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    status, _, version = result.stdout.strip().partition(" ")
+    if result.returncode != 0 or not status.startswith("ii") or not version:
+        return None
+    return version
+
+
+def exact_dependency(package: str) -> str:
+    """Depend on the exact build of one of our packages that this one was linked against.
+
+    The package names stay the same across FFmpeg/Kodi releases, so an unversioned
+    dependency is also satisfied by an older build with different sonames."""
+    version = installed_deb_version(package)
+    return f"{package} (= {version})" if version else package
+
+
+def runtime_env() -> dict[str, str]:
+    """Environment of an installed binary on the device: no LD_LIBRARY_PATH."""
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
+def check_runtime_libs(binary: Path) -> None:
+    """Fail if an installed binary cannot resolve its libraries the way it would on the device."""
+    out = capture(["ldd", str(binary)], env=runtime_env(), check=False)
+    missing = [line.strip() for line in out.splitlines() if "not found" in line]
+    if missing:
+        die(
+            f"{binary} cannot load its libraries without LD_LIBRARY_PATH "
+            "(is the install prefix in /etc/ld.so.conf.d and the ldconfig cache up to date?):\n  "
+            + "\n  ".join(missing)
+        )
+
+
 def create_deb(
     config: Config,
     *,
@@ -601,6 +643,10 @@ def create_deb(
         "--description", description,
         "--license", "mixed",
         "--deb-no-default-config-files",
+        # Refresh the dynamic linker cache on install/remove, like Debian library packages
+        # (dh_makeshlibs) do. Without it, new sonames in /usr/local/lib stay unresolvable
+        # until someone runs ldconfig by hand.
+        "--deb-activate-noawait", "ldconfig",
         "-C", str(stage),
     ]
 
@@ -656,8 +702,6 @@ def maybe_package_or_install(
 
     if config.install_direct:
         install_stage_direct(config, stage)
-
-    run([*config.sudo, "ldconfig"], check=False)
 
 
 def git_reset_tree(src: Path) -> None:
@@ -808,11 +852,12 @@ def build_ffmpeg(config: Config) -> None:
     log("Verifying FFmpeg")
     ffmpeg = config.install_prefix / "bin" / "ffmpeg"
     if ffmpeg.exists():
-        out = capture([str(ffmpeg), "-hide_banner", "-hwaccels"], env=base_env(config))
+        check_runtime_libs(ffmpeg)
+        out = capture([str(ffmpeg), "-hide_banner", "-hwaccels"], env=runtime_env())
         print(out)
         if "v4l2request" not in out.split():
             die("Installed ffmpeg does not list the v4l2request hwaccel.")
-        out = capture([str(ffmpeg), "-hide_banner", "-decoders"], env=base_env(config))
+        out = capture([str(ffmpeg), "-hide_banner", "-decoders"], env=runtime_env())
         for codec in ("h264", "hevc", "vp9", "av1"):
             if not re.search(rf"^\s*V\S*\s+{codec}\s", out, re.MULTILINE):
                 die(f"Installed ffmpeg does not list the {codec} decoder.")
@@ -882,20 +927,21 @@ def build_mpv(config: Config) -> None:
         version=version,
         stage=stage,
         description="mpv with V4L2 Request hwdec support for Rockchip/RK3588",
-        depends=[config.ffmpeg_package, config.libplacebo_package],
+        depends=[exact_dependency(config.ffmpeg_package), exact_dependency(config.libplacebo_package)],
     )
 
     log("Verifying mpv")
     mpv = config.install_prefix / "bin" / "mpv"
     if mpv.exists():
-        out = capture([str(mpv), "--hwdec=help"], env=env)
+        check_runtime_libs(mpv)
+        out = capture([str(mpv), "--hwdec=help"], env=runtime_env())
         print(out)
         # Lines look like "  v4l2request (h264-v4l2request)".
         hwdecs = {line.split()[0] for line in out.splitlines() if line.startswith("  ") and line.strip()}
         if "v4l2request" not in hwdecs:
             die("mpv was built, but --hwdec=help does not list the v4l2request hwdec.")
         if has_v4l2request:
-            out = capture([str(mpv), "--gpu-hwdec-interop=help"], env=env)
+            out = capture([str(mpv), "--gpu-hwdec-interop=help"], env=runtime_env())
             print(out)
             if "v4l2request-overlay" not in out.split():
                 die("mpv was built, but --gpu-hwdec-interop=help does not list v4l2request-overlay.")
@@ -966,7 +1012,7 @@ def build_kodi(config: Config) -> None:
         version=version,
         stage=stage,
         description="Kodi GBM/GLES build using FFmpeg V4L2 Request stack for Rockchip/RK3588",
-        depends=[config.ffmpeg_package, "libdrm2", "libgbm1", "libegl1", "libgles2", "libasound2"],
+        depends=[exact_dependency(config.ffmpeg_package), "libdrm2", "libgbm1", "libegl1", "libgles2", "libasound2"],
     )
 
     log("Verifying Kodi FFmpeg linkage")
@@ -975,11 +1021,10 @@ def build_kodi(config: Config) -> None:
     if (config.build_debs and config.install_debs) or config.install_direct:
         if not kodi_bin.exists():
             die(f"Kodi binary not found at {kodi_bin}.")
-        out = capture(["ldd", str(kodi_bin)], env=env)
+        check_runtime_libs(kodi_bin)
+        out = capture(["ldd", str(kodi_bin)], env=runtime_env())
         libs = [line.strip() for line in out.splitlines() if re.search(r"lib(av|sw|postproc)", line)]
         print("\n".join(libs))
-        if "not found" in out:
-            die(f"{kodi_bin} has unresolved libraries:\n{out}")
         avcodec = next((line for line in libs if line.startswith("libavcodec")), "")
         if str(config.install_prefix) not in avcodec:
             die(f"Kodi does not link the libavcodec from {config.install_prefix}: {avcodec or 'not linked'}")
@@ -1045,7 +1090,7 @@ def build_joystick(config: Config) -> None:
         version=version,
         stage=stage,
         description="Kodi peripheral.joystick add-on for custom V4L2 Request Kodi build",
-        depends=[config.kodi_package],
+        depends=[exact_dependency(config.kodi_package)],
     )
 
 

@@ -189,15 +189,22 @@ or pass overrides in the workflow (`--ffmpeg-ref`, `--ffmpeg-patch-commit`, `--m
 
 ## Install on the ROCK Pi
 
-Copy the `.deb` files to the ROCK Pi 5B, then:
+Copy the `.deb` files from one build to the ROCK Pi 5B and install them together, so apt
+resolves the dependencies between them:
 
 ```bash
-sudo apt install ./ffmpeg-v4l2request-rockchip_*.deb
-sudo apt install ./mpv-v4l2request-rockchip_*.deb
-sudo apt install ./kodi-v4l2request-rockchip_*.deb
-sudo apt install ./kodi-v4l2request-peripheral-joystick-rockchip_*.deb
-sudo ldconfig
+sudo apt install ./libplacebo-rockchip_*.deb \
+  ./ffmpeg-v4l2request-rockchip_*.deb \
+  ./mpv-v4l2request-rockchip_*.deb \
+  ./kodi-v4l2request-rockchip_*.deb \
+  ./kodi-v4l2request-peripheral-joystick-rockchip_*.deb
 ```
+
+mpv, Kodi and the joystick add-on depend on the exact FFmpeg/libplacebo/Kodi build they were
+linked against, so apt refuses to mix packages from different builds instead of failing at runtime.
+The packages refresh the dynamic linker cache (`ldconfig` trigger) on install and removal. Packages
+built before that change need a manual `sudo ldconfig` after installing; otherwise Kodi fails with
+`libavcodec.so.63: cannot open shared object file`.
 
 Check:
 
